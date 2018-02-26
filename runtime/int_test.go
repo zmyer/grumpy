@@ -16,6 +16,7 @@ package grumpy
 
 import (
 	"math/big"
+	"runtime"
 	"testing"
 )
 
@@ -38,6 +39,19 @@ func TestIntBinaryOps(t *testing.T) {
 		{Div, NewList().ToObject(), NewInt(21).ToObject(), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for /: 'list' and 'int'")},
 		{Div, NewInt(1).ToObject(), NewInt(0).ToObject(), nil, mustCreateException(ZeroDivisionErrorType, "integer division or modulo by zero")},
 		{Div, NewInt(MinInt).ToObject(), NewInt(-1).ToObject(), NewLong(new(big.Int).Neg(minIntBig)).ToObject(), nil},
+		{DivMod, NewInt(7).ToObject(), NewInt(3).ToObject(), NewTuple2(NewInt(2).ToObject(), NewInt(1).ToObject()).ToObject(), nil},
+		{DivMod, NewInt(3).ToObject(), NewInt(-7).ToObject(), NewTuple2(NewInt(-1).ToObject(), NewInt(-4).ToObject()).ToObject(), nil},
+		{DivMod, NewInt(MaxInt).ToObject(), NewInt(MinInt).ToObject(), NewTuple2(NewInt(-1).ToObject(), NewInt(-1).ToObject()).ToObject(), nil},
+		{DivMod, NewInt(MinInt).ToObject(), NewInt(MaxInt).ToObject(), NewTuple2(NewInt(-2).ToObject(), NewInt(MaxInt-1).ToObject()).ToObject(), nil},
+		{DivMod, NewList().ToObject(), NewInt(21).ToObject(), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for divmod(): 'list' and 'int'")},
+		{DivMod, NewInt(1).ToObject(), NewInt(0).ToObject(), nil, mustCreateException(ZeroDivisionErrorType, "integer division or modulo by zero")},
+		{DivMod, NewInt(MinInt).ToObject(), NewInt(-1).ToObject(), NewTuple2(NewLong(new(big.Int).Neg(minIntBig)).ToObject(), NewLong(big.NewInt(0)).ToObject()).ToObject(), nil},
+		{FloorDiv, NewInt(7).ToObject(), NewInt(3).ToObject(), NewInt(2).ToObject(), nil},
+		{FloorDiv, NewInt(MaxInt).ToObject(), NewInt(MinInt).ToObject(), NewInt(-1).ToObject(), nil},
+		{FloorDiv, NewInt(MinInt).ToObject(), NewInt(MaxInt).ToObject(), NewInt(-2).ToObject(), nil},
+		{FloorDiv, NewList().ToObject(), NewInt(21).ToObject(), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for //: 'list' and 'int'")},
+		{FloorDiv, NewInt(1).ToObject(), NewInt(0).ToObject(), nil, mustCreateException(ZeroDivisionErrorType, "integer division or modulo by zero")},
+		{FloorDiv, NewInt(MinInt).ToObject(), NewInt(-1).ToObject(), NewLong(new(big.Int).Neg(minIntBig)).ToObject(), nil},
 		{LShift, NewInt(2).ToObject(), NewInt(4).ToObject(), NewInt(32).ToObject(), nil},
 		{LShift, NewInt(-12).ToObject(), NewInt(10).ToObject(), NewInt(-12288).ToObject(), nil},
 		{LShift, NewInt(10).ToObject(), NewInt(100).ToObject(), NewLong(new(big.Int).Lsh(big.NewInt(10), 100)).ToObject(), nil},
@@ -63,6 +77,10 @@ func TestIntBinaryOps(t *testing.T) {
 		{Or, NewInt(-100).ToObject(), NewInt(50).ToObject(), NewInt(-66).ToObject(), nil},
 		{Or, NewInt(MaxInt).ToObject(), NewInt(MinInt).ToObject(), NewInt(-1).ToObject(), nil},
 		{Or, newObject(ObjectType), NewInt(-100).ToObject(), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for |: 'object' and 'int'")},
+		{Pow, NewInt(2).ToObject(), NewInt(128).ToObject(), NewLong(big.NewInt(0).Exp(big.NewInt(2), big.NewInt(128), nil)).ToObject(), nil},
+		{Pow, NewInt(2).ToObject(), newObject(ObjectType), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for **: 'int' and 'object'")},
+		{Pow, NewInt(2).ToObject(), NewInt(-2).ToObject(), NewFloat(0.25).ToObject(), nil},
+		{Pow, newObject(ObjectType), NewInt(2).ToObject(), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for **: 'object' and 'int'")},
 		{Sub, NewInt(22).ToObject(), NewInt(18).ToObject(), NewInt(4).ToObject(), nil},
 		{Sub, IntType.ToObject(), NewInt(42).ToObject(), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for -: 'type' and 'int'")},
 		{Sub, NewInt(MinInt).ToObject(), NewInt(1).ToObject(), NewLong(new(big.Int).Sub(minIntBig, big.NewInt(1))).ToObject(), nil},
@@ -145,6 +163,7 @@ func TestIntNew(t *testing.T) {
 		{args: wrapArgs(IntType, "102", 0), want: NewInt(102).ToObject()},
 		{args: wrapArgs(IntType, 42), want: NewInt(42).ToObject()},
 		{args: wrapArgs(IntType, -3.14), want: NewInt(-3).ToObject()},
+		{args: wrapArgs(subType, overflowLong), wantExc: mustCreateException(OverflowErrorType, "Python int too large to convert to a Go int")},
 		{args: wrapArgs(strictEqType, 42), want: (&Int{Object{typ: strictEqType}, 42}).ToObject()},
 		{args: wrapArgs(IntType, newObject(goodSlotType)), want: NewInt(3).ToObject()},
 		{args: wrapArgs(IntType, newObject(badSlotType)), wantExc: mustCreateException(TypeErrorType, "__int__ returned non-int (type object)")},
@@ -158,6 +177,7 @@ func TestIntNew(t *testing.T) {
 		{args: wrapArgs(IntType, "asldkfj", 1), wantExc: mustCreateException(ValueErrorType, "int() base must be >= 2 and <= 36")},
 		{args: wrapArgs(IntType, "asldkfj", 37), wantExc: mustCreateException(ValueErrorType, "int() base must be >= 2 and <= 36")},
 		{args: wrapArgs(IntType, "@#%*(#", 36), wantExc: mustCreateException(ValueErrorType, "invalid literal for int() with base 36: @#%*(#")},
+		{args: wrapArgs(IntType, "123", overflowLong), wantExc: mustCreateException(OverflowErrorType, "Python int too large to convert to a Go int")},
 		{args: wrapArgs(IntType, "32059823095809238509238590835"), want: NewLong(func() *big.Int { i, _ := new(big.Int).SetString("32059823095809238509238590835", 0); return i }()).ToObject()},
 		{args: wrapArgs(IntType, newObject(ObjectType)), wantExc: mustCreateException(TypeErrorType, "int() argument must be a string or a number, not 'object'")},
 		{args: wrapArgs(IntType, newObject(fooType)), wantExc: mustCreateException(TypeErrorType, "__int__ returned non-int (type Foo)")},
@@ -196,15 +216,19 @@ func TestIntNewInterned(t *testing.T) {
 
 func BenchmarkIntNew(b *testing.B) {
 	b.Run("interned", func(b *testing.B) {
+		var ret *Object
 		for i := 0; i < b.N; i++ {
-			_ = NewInt(1).ToObject()
+			ret = NewInt(1).ToObject()
 		}
+		runtime.KeepAlive(ret)
 	})
 
 	b.Run("not interned", func(b *testing.B) {
+		var ret *Object
 		for i := 0; i < b.N; i++ {
-			_ = NewInt(internedIntMax + 5).ToObject()
+			ret = NewInt(internedIntMax + 5).ToObject()
 		}
+		runtime.KeepAlive(ret)
 	})
 }
 

@@ -61,20 +61,61 @@ func (l *List) Append(o *Object) {
 	l.mutex.Unlock()
 }
 
+// DelItem removes the index'th element of l.
+func (l *List) DelItem(f *Frame, index int) *BaseException {
+	l.mutex.Lock()
+	numElems := len(l.elems)
+	i, raised := seqCheckedIndex(f, numElems, index)
+	if raised == nil {
+		copy(l.elems[i:numElems-1], l.elems[i+1:numElems])
+		l.elems = l.elems[:numElems-1]
+	}
+	l.mutex.Unlock()
+	return raised
+}
+
+// DelSlice removes the slice of l specified by s.
+func (l *List) DelSlice(f *Frame, s *Slice) *BaseException {
+	l.mutex.Lock()
+	numListElems := len(l.elems)
+	start, stop, step, numSliceElems, raised := s.calcSlice(f, numListElems)
+	if raised == nil {
+		if step == 1 {
+			copy(l.elems[start:numListElems-numSliceElems], l.elems[stop:numListElems])
+		} else {
+			j := 0
+			for i := start; i != stop; i += step {
+				next := i + step
+				if next > numListElems {
+					next = numListElems
+				}
+				dest := l.elems[i-j : next-j-1]
+				src := l.elems[i+1 : next]
+				copy(dest, src)
+				j++
+			}
+		}
+		l.elems = l.elems[:numListElems-numSliceElems]
+	}
+	l.mutex.Unlock()
+	return raised
+}
+
 // SetItem sets the index'th element of l to value.
 func (l *List) SetItem(f *Frame, index int, value *Object) *BaseException {
-	l.mutex.RLock()
+	l.mutex.Lock()
 	i, raised := seqCheckedIndex(f, len(l.elems), index)
 	if raised == nil {
 		l.elems[i] = value
 	}
-	l.mutex.RUnlock()
+	l.mutex.Unlock()
 	return raised
 }
 
 // SetSlice replaces the slice of l specified by s with the contents of value
 // (an iterable).
 func (l *List) SetSlice(f *Frame, s *Slice, value *Object) *BaseException {
+	l.mutex.Lock()
 	numListElems := len(l.elems)
 	start, stop, step, numSliceElems, raised := s.calcSlice(f, numListElems)
 	if raised == nil {
@@ -98,6 +139,7 @@ func (l *List) SetSlice(f *Frame, s *Slice, value *Object) *BaseException {
 			return nil
 		})
 	}
+	l.mutex.Unlock()
 	return raised
 }
 
@@ -114,7 +156,9 @@ func (l *List) Sort(f *Frame) (raised *BaseException) {
 		}
 		raised = sorter.raised
 	}()
-	sort.Sort(sorter)
+	// Python guarantees stability.  See note (9) in:
+	// https://docs.python.org/2/library/stdtypes.html#mutable-sequence-types
+	sort.Stable(sorter)
 	return nil
 }
 
@@ -161,8 +205,61 @@ func listAppend(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
 	return None, nil
 }
 
+func listCount(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+	if raised := checkMethodArgs(f, "count", args, ListType, ObjectType); raised != nil {
+		return nil, raised
+	}
+	return seqCount(f, args[0], args[1])
+}
+
+func listDelItem(f *Frame, o *Object, key *Object) *BaseException {
+	l := toListUnsafe(o)
+	if key.isInstance(SliceType) {
+		return l.DelSlice(f, toSliceUnsafe(key))
+	}
+	if key.typ.slots.Index == nil {
+		format := "list indices must be integers, not %s"
+		return f.RaiseType(TypeErrorType, fmt.Sprintf(format, key.Type().Name()))
+	}
+	index, raised := IndexInt(f, key)
+	if raised != nil {
+		return raised
+	}
+	return l.DelItem(f, index)
+}
+
+func listRemove(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+	if raised := checkMethodArgs(f, "remove", args, ListType, ObjectType); raised != nil {
+		return nil, raised
+	}
+	value := args[1]
+	l := toListUnsafe(args[0])
+	l.mutex.Lock()
+	index, raised := seqFindElem(f, l.elems, value)
+	if raised == nil {
+		if index != -1 {
+			l.elems = append(l.elems[:index], l.elems[index+1:]...)
+		} else {
+			raised = f.RaiseType(ValueErrorType, "list.remove(x): x not in list")
+		}
+	}
+	l.mutex.Unlock()
+	if raised != nil {
+		return nil, raised
+	}
+	return None, nil
+}
+
+func listExtend(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	argc := len(args)
+	if argc != 2 {
+		return nil, f.RaiseType(TypeErrorType, fmt.Sprintf("extend() takes exactly one argument (%d given)", argc))
+	}
+	return listIAdd(f, args[0], args[1])
+}
+
 func listContains(f *Frame, l, v *Object) (*Object, *BaseException) {
-	return seqContains(f, toListUnsafe(l).elems, v)
+	return seqContains(f, l, v)
 }
 
 func listEq(f *Frame, v, w *Object) (*Object, *BaseException) {
@@ -289,6 +386,85 @@ func listNE(f *Frame, v, w *Object) (*Object, *BaseException) {
 	return listCompare(f, toListUnsafe(v), w, NE)
 }
 
+func listIndex(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	expectedTypes := []*Type{ListType, ObjectType, ObjectType, ObjectType}
+	argc := len(args)
+	var raised *BaseException
+	if argc == 2 || argc == 3 {
+		expectedTypes = expectedTypes[:argc]
+	}
+	if raised = checkMethodArgs(f, "index", args, expectedTypes...); raised != nil {
+		return nil, raised
+	}
+	l := toListUnsafe(args[0])
+	l.mutex.RLock()
+	numElems := len(l.elems)
+	start, stop := 0, numElems
+	if argc > 2 {
+		start, raised = IndexInt(f, args[2])
+		if raised != nil {
+			l.mutex.RUnlock()
+			return nil, raised
+		}
+	}
+	if argc > 3 {
+		stop, raised = IndexInt(f, args[3])
+		if raised != nil {
+			l.mutex.RUnlock()
+			return nil, raised
+		}
+	}
+	start, stop = adjustIndex(start, stop, numElems)
+	value := args[1]
+	index := -1
+	if start < numElems && start < stop {
+		index, raised = seqFindElem(f, l.elems[start:stop], value)
+	}
+	l.mutex.RUnlock()
+	if raised != nil {
+		return nil, raised
+	}
+	if index == -1 {
+		return nil, f.RaiseType(ValueErrorType, fmt.Sprintf("%v is not in list", value))
+	}
+	return NewInt(index + start).ToObject(), nil
+}
+
+func listPop(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	argc := len(args)
+	expectedTypes := []*Type{ListType, ObjectType}
+	if argc == 1 {
+		expectedTypes = expectedTypes[:1]
+	}
+	if raised := checkMethodArgs(f, "pop", args, expectedTypes...); raised != nil {
+		return nil, raised
+	}
+	i := -1
+	if argc == 2 {
+		var raised *BaseException
+		i, raised = ToIntValue(f, args[1])
+		if raised != nil {
+			return nil, raised
+		}
+	}
+	l := toListUnsafe(args[0])
+	l.mutex.Lock()
+	numElems := len(l.elems)
+	if i < 0 {
+		i += numElems
+	}
+	var item *Object
+	var raised *BaseException
+	if i >= numElems || i < 0 {
+		raised = f.RaiseType(IndexErrorType, "list index out of range")
+	} else {
+		item = l.elems[i]
+		l.elems = append(l.elems[:i], l.elems[i+1:]...)
+	}
+	l.mutex.Unlock()
+	return item, raised
+}
+
 func listRepr(f *Frame, o *Object) (*Object, *BaseException) {
 	l := toListUnsafe(o)
 	if f.reprEnter(l.ToObject()) {
@@ -321,7 +497,7 @@ func listReverse(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 
 func listSetItem(f *Frame, o, key, value *Object) *BaseException {
 	l := toListUnsafe(o)
-	if key.typ.slots.Int != nil {
+	if key.typ.slots.Index != nil {
 		i, raised := IndexInt(f, key)
 		if raised != nil {
 			return raised
@@ -334,12 +510,29 @@ func listSetItem(f *Frame, o, key, value *Object) *BaseException {
 	return f.RaiseType(TypeErrorType, fmt.Sprintf("list indices must be integers, not %s", key.Type().Name()))
 }
 
+func listSort(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	// TODO: Support (cmp=None, key=None, reverse=False)
+	if raised := checkMethodArgs(f, "sort", args, ListType); raised != nil {
+		return nil, raised
+	}
+	l := toListUnsafe(args[0])
+	l.Sort(f)
+	return None, nil
+}
+
 func initListType(dict map[string]*Object) {
 	dict["append"] = newBuiltinFunction("append", listAppend).ToObject()
+	dict["count"] = newBuiltinFunction("count", listCount).ToObject()
+	dict["extend"] = newBuiltinFunction("extend", listExtend).ToObject()
+	dict["index"] = newBuiltinFunction("index", listIndex).ToObject()
 	dict["insert"] = newBuiltinFunction("insert", listInsert).ToObject()
+	dict["pop"] = newBuiltinFunction("pop", listPop).ToObject()
+	dict["remove"] = newBuiltinFunction("remove", listRemove).ToObject()
 	dict["reverse"] = newBuiltinFunction("reverse", listReverse).ToObject()
+	dict["sort"] = newBuiltinFunction("sort", listSort).ToObject()
 	ListType.slots.Add = &binaryOpSlot{listAdd}
 	ListType.slots.Contains = &binaryOpSlot{listContains}
+	ListType.slots.DelItem = &delItemSlot{listDelItem}
 	ListType.slots.Eq = &binaryOpSlot{listEq}
 	ListType.slots.GE = &binaryOpSlot{listGE}
 	ListType.slots.GetItem = &binaryOpSlot{listGetItem}

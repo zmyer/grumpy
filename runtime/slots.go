@@ -369,26 +369,35 @@ func (s *unaryOpSlot) wrapCallable(callable *Object) bool {
 // The wrapper structs permit comparison of like slots which is occasionally
 // necessary to determine whether a function has been overridden by a subclass.
 type typeSlots struct {
+	Abs          *unaryOpSlot
 	Add          *binaryOpSlot
 	And          *binaryOpSlot
 	Basis        *basisSlot
 	Call         *callSlot
+	Cmp          *binaryOpSlot
+	Complex      *unaryOpSlot
 	Contains     *binaryOpSlot
 	DelAttr      *delAttrSlot
 	Delete       *deleteSlot
 	DelItem      *delItemSlot
 	Div          *binaryOpSlot
+	DivMod       *binaryOpSlot
 	Eq           *binaryOpSlot
 	Float        *unaryOpSlot
+	FloorDiv     *binaryOpSlot
 	GE           *binaryOpSlot
 	Get          *getSlot
 	GetAttribute *getAttributeSlot
 	GetItem      *binaryOpSlot
 	GT           *binaryOpSlot
 	Hash         *unaryOpSlot
+	Hex          *unaryOpSlot
 	IAdd         *binaryOpSlot
 	IAnd         *binaryOpSlot
 	IDiv         *binaryOpSlot
+	IDivMod      *binaryOpSlot
+	IFloorDiv    *binaryOpSlot
+	ILShift      *binaryOpSlot
 	IMod         *binaryOpSlot
 	IMul         *binaryOpSlot
 	Index        *unaryOpSlot
@@ -396,6 +405,8 @@ type typeSlots struct {
 	Int          *unaryOpSlot
 	Invert       *unaryOpSlot
 	IOr          *binaryOpSlot
+	IPow         *binaryOpSlot
+	IRShift      *binaryOpSlot
 	ISub         *binaryOpSlot
 	Iter         *unaryOpSlot
 	IXor         *binaryOpSlot
@@ -412,15 +423,21 @@ type typeSlots struct {
 	New          *newSlot
 	Next         *unaryOpSlot
 	NonZero      *unaryOpSlot
+	Oct          *unaryOpSlot
 	Or           *binaryOpSlot
+	Pos          *unaryOpSlot
+	Pow          *binaryOpSlot
 	RAdd         *binaryOpSlot
 	RAnd         *binaryOpSlot
 	RDiv         *binaryOpSlot
+	RDivMod      *binaryOpSlot
 	Repr         *unaryOpSlot
+	RFloorDiv    *binaryOpSlot
 	RLShift      *binaryOpSlot
 	RMod         *binaryOpSlot
 	RMul         *binaryOpSlot
 	ROr          *binaryOpSlot
+	RPow         *binaryOpSlot
 	RRShift      *binaryOpSlot
 	RShift       *binaryOpSlot
 	RSub         *binaryOpSlot

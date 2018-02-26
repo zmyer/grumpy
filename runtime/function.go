@@ -25,6 +25,9 @@ var (
 	// StaticMethodType is the object representing the Python
 	// 'staticmethod' type.
 	StaticMethodType = newBasisType("staticmethod", reflect.TypeOf(staticMethod{}), toStaticMethodUnsafe, ObjectType)
+	// ClassMethodType is the object representing the Python
+	// 'classmethod' type.
+	ClassMethodType = newBasisType("classmethod", reflect.TypeOf(classMethod{}), toClassMethodUnsafe, ObjectType)
 )
 
 // Args represent positional parameters in a call to a Python function.
@@ -80,15 +83,6 @@ type Function struct {
 	globals *Dict  `attr:"func_globals"`
 }
 
-// FunctionArg describes a parameter to a Python function.
-type FunctionArg struct {
-	// Name is the argument name.
-	Name string
-	// Def is the default value to use if the argument is not provided. If
-	// no default is specified then Def is nil.
-	Def *Object
-}
-
 // NewFunction creates a function object corresponding to a Python function
 // taking the given args, vararg and kwarg. When called, the arguments are
 // validated before calling fn. This includes checking that an appropriate
@@ -127,8 +121,14 @@ func functionCall(f *Frame, callable *Object, args Args, kwargs KWArgs) (*Object
 	return code.Eval(f, fun.globals, args, kwargs)
 }
 
-func functionGet(_ *Frame, desc, instance *Object, owner *Type) (*Object, *BaseException) {
-	return NewMethod(toFunctionUnsafe(desc), instance, owner).ToObject(), nil
+func functionGet(f *Frame, desc, instance *Object, owner *Type) (*Object, *BaseException) {
+	args := f.MakeArgs(3)
+	args[0] = desc
+	args[1] = instance
+	args[2] = owner.ToObject()
+	ret, raised := MethodType.Call(f, args, nil)
+	f.FreeArgs(args)
+	return ret, raised
 }
 
 func functionRepr(_ *Frame, o *Object) (*Object, *BaseException) {
@@ -181,4 +181,50 @@ func staticMethodInit(f *Frame, o *Object, args Args, _ KWArgs) (*Object, *BaseE
 func initStaticMethodType(map[string]*Object) {
 	StaticMethodType.slots.Get = &getSlot{staticMethodGet}
 	StaticMethodType.slots.Init = &initSlot{staticMethodInit}
+}
+
+// classMethod represents Python 'classmethod' objects.
+type classMethod struct {
+	Object
+	callable *Object
+}
+
+func newClassMethod(callable *Object) *classMethod {
+	return &classMethod{Object{typ: ClassMethodType}, callable}
+}
+
+func toClassMethodUnsafe(o *Object) *classMethod {
+	return (*classMethod)(o.toPointer())
+}
+
+// ToObject upcasts f to an Object.
+func (m *classMethod) ToObject() *Object {
+	return &m.Object
+}
+
+func classMethodGet(f *Frame, desc, _ *Object, owner *Type) (*Object, *BaseException) {
+	m := toClassMethodUnsafe(desc)
+	if m.callable == nil {
+		return nil, f.RaiseType(RuntimeErrorType, "uninitialized classmethod object")
+	}
+	args := f.MakeArgs(3)
+	args[0] = m.callable
+	args[1] = owner.ToObject()
+	args[2] = args[1]
+	ret, raised := MethodType.Call(f, args, nil)
+	f.FreeArgs(args)
+	return ret, raised
+}
+
+func classMethodInit(f *Frame, o *Object, args Args, _ KWArgs) (*Object, *BaseException) {
+	if raised := checkFunctionArgs(f, "__init__", args, ObjectType); raised != nil {
+		return nil, raised
+	}
+	toClassMethodUnsafe(o).callable = args[0]
+	return None, nil
+}
+
+func initClassMethodType(map[string]*Object) {
+	ClassMethodType.slots.Get = &getSlot{classMethodGet}
+	ClassMethodType.slots.Init = &initSlot{classMethodInit}
 }

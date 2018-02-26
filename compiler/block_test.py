@@ -16,13 +16,15 @@
 
 """Tests Package, Block, BlockVisitor and related classes."""
 
-import ast
+from __future__ import unicode_literals
+
 import textwrap
 import unittest
 
 from grumpy.compiler import block
+from grumpy.compiler import imputil
 from grumpy.compiler import util
-
+from grumpy import pythonparser
 
 class PackageTest(unittest.TestCase):
 
@@ -39,30 +41,11 @@ class PackageTest(unittest.TestCase):
 
 class BlockTest(unittest.TestCase):
 
-  def testAddImport(self):
-    module_block = _MakeModuleBlock()
-    func1_block = block.FunctionBlock(module_block, 'func1', {}, False)
-    func2_block = block.FunctionBlock(func1_block, 'func2', {}, False)
-    package = func2_block.add_import('foo/bar')
-    self.assertEqual(package.name, 'grumpy/lib/foo/bar')
-    self.assertEqual(package.alias, 'π_grumpyΓlibΓfooΓbar')
-    self.assertEqual(module_block.imports, {'grumpy/lib/foo/bar': package})
-
-  def testAddImportRepeated(self):
-    b = _MakeModuleBlock()
-    package = b.add_import('foo')
-    self.assertEqual(package.name, 'grumpy/lib/foo')
-    self.assertEqual(package.alias, 'π_grumpyΓlibΓfoo')
-    self.assertEqual(b.imports, {'grumpy/lib/foo': package})
-    package2 = b.add_import('foo')
-    self.assertIs(package, package2)
-    self.assertEqual(b.imports, {'grumpy/lib/foo': package})
-
   def testLoop(self):
     b = _MakeModuleBlock()
-    loop = b.push_loop()
+    loop = b.push_loop(None)
     self.assertEqual(loop, b.top_loop())
-    inner_loop = b.push_loop()
+    inner_loop = b.push_loop(None)
     self.assertEqual(inner_loop, b.top_loop())
     b.pop_loop()
     self.assertEqual(loop, b.top_loop())
@@ -106,7 +89,7 @@ class BlockTest(unittest.TestCase):
   def _ResolveName(self, b, name):
     writer = util.Writer()
     b.resolve_name(writer, name)
-    return writer.out.getvalue()
+    return writer.getvalue()
 
 
 class BlockVisitorTest(unittest.TestCase):
@@ -204,7 +187,7 @@ class BlockVisitorTest(unittest.TestCase):
                             visitor.visit, _ParseStmt('global foo'))
 
   def testGlobalUsedPriorToDeclaration(self):
-    node = ast.parse('foo = 42\nglobal foo')
+    node = pythonparser.parse('foo = 42\nglobal foo')
     visitor = block.BlockVisitor()
     self.assertRaisesRegexp(util.ParseError, 'used prior to global declaration',
                             visitor.generic_visit, node)
@@ -243,11 +226,13 @@ class FunctionBlockVisitorTest(unittest.TestCase):
 
 
 def _MakeModuleBlock():
-  return block.ModuleBlock('__main__', 'grumpy', 'grumpy/lib', '<test>', [])
+  importer = imputil.Importer(None, '__main__', '/tmp/foo.py', False)
+  return block.ModuleBlock(importer, '__main__', '<test>', '',
+                           imputil.FutureFeatures())
 
 
 def _ParseStmt(stmt_str):
-  return ast.parse(stmt_str).body[0]
+  return pythonparser.parse(stmt_str).body[0]
 
 
 if __name__ == '__main__':

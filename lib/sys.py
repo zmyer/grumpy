@@ -14,9 +14,10 @@
 
 """System-specific parameters and functions."""
 
-from __go__.os import Args
-from __go__.grumpy import SysModules, MaxInt  # pylint: disable=g-multiple-import
-from __go__.runtime import Version
+from '__go__/os' import Args
+from '__go__/grumpy' import SysModules, MaxInt, Stdin as stdin, Stdout as stdout, Stderr as stderr  # pylint: disable=g-multiple-import
+from '__go__/runtime' import (GOOS as platform, Version)
+from '__go__/unicode' import MaxRune
 
 argv = []
 for arg in Args:
@@ -24,10 +25,14 @@ for arg in Args:
 
 goversion = Version()
 maxint = MaxInt
+maxsize = maxint
+maxunicode = MaxRune
 modules = SysModules
 py3kwarning = False
 warnoptions = []
-
+# TODO: Support actual byteorder
+byteorder = 'little'
+version = '2.7.13'
 
 class _Flags(object):
   """Container class for sys.flags."""
@@ -52,6 +57,10 @@ class _Flags(object):
 flags = _Flags()
 
 
+def exc_clear():
+  __frame__().__exc_clear__()
+
+
 def exc_info():
   e, tb = __frame__().__exc_info__()  # pylint: disable=undefined-variable
   t = None
@@ -62,3 +71,13 @@ def exc_info():
 
 def exit(code=None):  # pylint: disable=redefined-builtin
   raise SystemExit(code)
+
+
+def _getframe(depth=0):
+  f = __frame__()
+  while depth > 0 and f is not None:
+    f = f.f_back
+    depth -= 1
+  if f is None:
+    raise ValueError('call stack is not deep enough')
+  return f

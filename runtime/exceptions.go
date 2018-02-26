@@ -28,6 +28,8 @@ var (
 	// EnvironmentErrorType corresponds to the Python type
 	// 'EnvironmentError'.
 	EnvironmentErrorType = newSimpleType("EnvironmentError", StandardErrorType)
+	// EOFErrorType corresponds to the Python type 'EOFError'.
+	EOFErrorType = newSimpleType("EOFError", StandardErrorType)
 	// ExceptionType corresponds to the Python type 'Exception'.
 	ExceptionType = newSimpleType("Exception", BaseExceptionType)
 	// FutureWarningType corresponds to the Python type 'FutureWarning'.
@@ -40,6 +42,8 @@ var (
 	IndexErrorType = newSimpleType("IndexError", LookupErrorType)
 	// IOErrorType corresponds to the Python type 'IOError'.
 	IOErrorType = newSimpleType("IOError", EnvironmentErrorType)
+	// KeyboardInterruptType corresponds to the Python type 'KeyboardInterrupt'.
+	KeyboardInterruptType = newSimpleType("KeyboardInterrupt", BaseExceptionType)
 	// KeyErrorType corresponds to the Python type 'KeyError'.
 	KeyErrorType = newSimpleType("KeyError", LookupErrorType)
 	// LookupErrorType corresponds to the Python type 'LookupError'.

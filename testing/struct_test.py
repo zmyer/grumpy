@@ -12,4 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import _struct as struct
 
+# struct test
+A = 0x67452301
+B = 0xefcdab89
+C = 0x98badcfe
+D = 0x10325476
+
+expected = '\x01#Eg\x89\xab\xcd\xef\xfe\xdc\xba\x98vT2\x10'
+
+assert struct.pack("<IIII", A, B, C, D) == expected

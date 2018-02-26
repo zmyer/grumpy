@@ -20,6 +20,20 @@ import tempfile
 import weetest
 
 
+def TestChdirAndGetCwd():
+  path = os.getcwd()
+  os.chdir('.')
+  assert os.getcwd() == path
+  tempdir = tempfile.mkdtemp()
+  try:
+    os.chdir(tempdir)
+    assert tempdir in os.getcwd()
+  finally:
+    os.chdir(path)
+    os.rmdir(tempdir)
+    assert os.getcwd() == path
+
+
 def TestChmod():
   fd, path = tempfile.mkstemp()
   os.close(fd)
@@ -85,6 +99,41 @@ def TestFDOpenOSError():
     pass
   else:
     raise AssertionError
+
+
+def TestMkdir():
+  path = 'foobarqux'
+  try:
+    os.stat(path)
+  except OSError:
+    pass
+  else:
+    raise AssertionError
+  try:
+    os.mkdir(path)
+    assert stat.S_ISDIR(os.stat(path).st_mode)
+  except OSError:
+    raise AssertionError
+  finally:
+      os.rmdir(path)
+
+
+def TestPopenRead():
+  f = os.popen('qux')
+  assert f.close() == 32512
+  f = os.popen('echo hello')
+  try:
+    assert f.read() == 'hello\n'
+  finally:
+    assert f.close() == 0
+
+
+def TestPopenWrite():
+  # TODO: We should verify the output but there's no good way to swap out stdout
+  # at the moment.
+  f = os.popen('cat', 'w')
+  f.write('popen write\n')
+  f.close()
 
 
 def TestRemove():
@@ -192,6 +241,13 @@ def TestStatNoExist():
     raise AssertionError
   finally:
     os.rmdir(path)
+
+
+def TestWaitPid():
+  try:
+    pid, status = os.waitpid(-1, os.WNOHANG)
+  except OSError as e:
+    assert 'no child processes' in str(e).lower()
 
 
 if __name__ == '__main__':

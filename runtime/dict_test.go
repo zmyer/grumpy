@@ -17,6 +17,7 @@ package grumpy
 import (
 	"reflect"
 	"regexp"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -41,6 +42,29 @@ func TestNewStringDict(t *testing.T) {
 			return newStringDict(cas.m).ToObject(), nil
 		}).ToObject()
 		if err := runInvokeTestCase(fun, &invokeTestCase{want: cas.want.ToObject()}); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestDictClear(t *testing.T) {
+	clear := mustNotRaise(GetAttr(NewRootFrame(), DictType.ToObject(), NewStr("clear"), nil))
+	fun := newBuiltinFunction("TestDictClear", func(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+		if _, raised := clear.Call(f, args, nil); raised != nil {
+			return nil, raised
+		}
+		return args[0], nil
+	}).ToObject()
+	cases := []invokeTestCase{
+		{args: wrapArgs(NewDict()), want: NewDict().ToObject()},
+		{args: wrapArgs(newStringDict(map[string]*Object{"foo": NewInt(1).ToObject()})), want: NewDict().ToObject()},
+		{args: wrapArgs(newTestDict(2, None, "baz", 3.14)), want: NewDict().ToObject()},
+		{args: wrapArgs(NewDict(), NewList()), wantExc: mustCreateException(TypeErrorType, "'clear' of 'dict' requires 1 arguments")},
+		{args: wrapArgs(NewDict(), None), wantExc: mustCreateException(TypeErrorType, "'clear' of 'dict' requires 1 arguments")},
+		{args: wrapArgs(None), wantExc: mustCreateException(TypeErrorType, "unbound method clear() must be called with dict instance as first argument (got NoneType instance instead)")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
 			t.Error(err)
 		}
 	}
@@ -108,34 +132,21 @@ func TestDictDelItemString(t *testing.T) {
 }
 
 func TestDictEqNE(t *testing.T) {
-	fun := newBuiltinFunction("TestDictEqNE", func(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
-		if raised := checkMethodArgs(f, "TestDictEqNE", args, DictType, DictType, BoolType); raised != nil {
+	fun := wrapFuncForTest(func(f *Frame, v, w *Object) (*Object, *BaseException) {
+		eq, raised := Eq(f, v, w)
+		if raised != nil {
 			return nil, raised
 		}
-		d1, d2 := args[0], args[1]
-		wantEq := toIntUnsafe(args[2]).IsTrue()
-		if eq, raised := Eq(f, d1, d2); raised != nil {
+		ne, raised := NE(f, v, w)
+		if raised != nil {
 			return nil, raised
-		} else if !eq.isInstance(BoolType) || toIntUnsafe(eq).IsTrue() != wantEq {
-			t.Errorf("Eq(%v, %v) = %v, want %v", d1, d2, eq, GetBool(wantEq))
 		}
-		if eq, raised := Eq(f, d2, d1); raised != nil {
+		valid := GetBool(eq == True.ToObject() && ne == False.ToObject() || eq == False.ToObject() && ne == True.ToObject()).ToObject()
+		if raised := Assert(f, valid, NewStr("invalid values for __eq__ or __ne__").ToObject()); raised != nil {
 			return nil, raised
-		} else if !eq.isInstance(BoolType) || toIntUnsafe(eq).IsTrue() != wantEq {
-			t.Errorf("Eq(%v, %v) = %v, want %v", d2, d1, eq, GetBool(wantEq))
 		}
-		if ne, raised := NE(f, d1, d2); raised != nil {
-			return nil, raised
-		} else if !ne.isInstance(BoolType) || toIntUnsafe(ne).IsTrue() == wantEq {
-			t.Errorf("NE(%v, %v) = %v, want %v", d1, d2, ne, GetBool(!wantEq))
-		}
-		if ne, raised := NE(f, d2, d1); raised != nil {
-			return nil, raised
-		} else if !ne.isInstance(BoolType) || toIntUnsafe(ne).IsTrue() == wantEq {
-			t.Errorf("NE(%v, %v) = %v, want %v", d2, d1, ne, GetBool(!wantEq))
-		}
-		return None, nil
-	}).ToObject()
+		return eq, nil
+	})
 	f := NewRootFrame()
 	large1, large2 := NewDict(), NewDict()
 	largeSize := 100
@@ -153,15 +164,16 @@ func TestDictEqNE(t *testing.T) {
 	}
 	o := newObject(ObjectType)
 	cases := []invokeTestCase{
-		{args: wrapArgs(NewDict(), NewDict(), true), want: None},
-		{args: wrapArgs(NewDict(), newTestDict("foo", true), false), want: None},
-		{args: wrapArgs(newTestDict("foo", "foo"), newTestDict("foo", "foo"), true), want: None},
-		{args: wrapArgs(newTestDict("foo", true), newTestDict("bar", true), false), want: None},
-		{args: wrapArgs(newTestDict("foo", true), newTestDict("foo", newObject(ObjectType)), false), want: None},
-		{args: wrapArgs(newTestDict("foo", true, "bar", false), newTestDict("bar", true), false), want: None},
-		{args: wrapArgs(newTestDict("foo", o, "bar", o), newTestDict("foo", o, "bar", o), true), want: None},
-		{args: wrapArgs(newTestDict(2, None, "foo", o), newTestDict("foo", o, 2, None), true), want: None},
-		{args: wrapArgs(large1, large2, true), want: None},
+		{args: wrapArgs(NewDict(), NewDict()), want: True.ToObject()},
+		{args: wrapArgs(NewDict(), newTestDict("foo", true)), want: False.ToObject()},
+		{args: wrapArgs(newTestDict("foo", "foo"), newTestDict("foo", "foo")), want: True.ToObject()},
+		{args: wrapArgs(newTestDict("foo", true), newTestDict("bar", true)), want: False.ToObject()},
+		{args: wrapArgs(newTestDict("foo", true), newTestDict("foo", newObject(ObjectType))), want: False.ToObject()},
+		{args: wrapArgs(newTestDict("foo", true, "bar", false), newTestDict("bar", true)), want: False.ToObject()},
+		{args: wrapArgs(newTestDict("foo", o, "bar", o), newTestDict("foo", o, "bar", o)), want: True.ToObject()},
+		{args: wrapArgs(newTestDict(2, None, "foo", o), newTestDict("foo", o, 2, None)), want: True.ToObject()},
+		{args: wrapArgs(large1, large2), want: True.ToObject()},
+		{args: wrapArgs(NewDict(), 123), want: False.ToObject()},
 	}
 	for _, cas := range cases {
 		if err := runInvokeTestCase(fun, &cas); err != "" {
@@ -221,6 +233,146 @@ func TestDictGetItem(t *testing.T) {
 	}
 }
 
+// BenchmarkDictGetItem is to keep an eye on the speed of contended dict access
+// in a fast read loop.
+func BenchmarkDictGetItem(b *testing.B) {
+	d := newTestDict(
+		"foo", 1,
+		"bar", 2,
+		None, 3,
+		4, 5)
+	k := NewInt(4).ToObject()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		f := NewRootFrame()
+		var ret *Object
+		var raised *BaseException
+		for pb.Next() {
+			ret, raised = d.GetItem(f, k)
+		}
+		runtime.KeepAlive(ret)
+		runtime.KeepAlive(raised)
+	})
+}
+
+func BenchmarkDictIterItems(b *testing.B) {
+	bench := func(d *Dict) func(*testing.B) {
+		return func(b *testing.B) {
+			f := NewRootFrame()
+			args := f.MakeArgs(1)
+			args[0] = d.ToObject()
+			b.ResetTimer()
+
+			var ret *Object
+			var raised *BaseException
+			for i := 0; i < b.N; i++ {
+				iter, _ := dictIterItems(f, args, nil)
+				for {
+					ret, raised = Next(f, iter)
+					if raised != nil {
+						if !raised.isInstance(StopIterationType) {
+							b.Fatalf("iteration failed with: %v", raised)
+						}
+						f.RestoreExc(nil, nil)
+						break
+					}
+				}
+			}
+			runtime.KeepAlive(ret)
+			runtime.KeepAlive(raised)
+		}
+	}
+
+	b.Run("0-elements", bench(newTestDict()))
+	b.Run("1-elements", bench(newTestDict(1, 2)))
+	b.Run("2-elements", bench(newTestDict(1, 2, 3, 4)))
+	b.Run("3-elements", bench(newTestDict(1, 2, 3, 4, 5, 6)))
+	b.Run("4-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8)))
+	b.Run("5-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)))
+	b.Run("6-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)))
+	b.Run("7-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)))
+	b.Run("8-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)))
+}
+
+func BenchmarkDictIterKeys(b *testing.B) {
+	bench := func(d *Dict) func(*testing.B) {
+		return func(b *testing.B) {
+			f := NewRootFrame()
+			args := f.MakeArgs(1)
+			args[0] = d.ToObject()
+			b.ResetTimer()
+
+			var ret *Object
+			var raised *BaseException
+			for i := 0; i < b.N; i++ {
+				iter, _ := dictIterKeys(f, args, nil)
+				for {
+					ret, raised = Next(f, iter)
+					if raised != nil {
+						if !raised.isInstance(StopIterationType) {
+							b.Fatalf("iteration failed with: %v", raised)
+						}
+						f.RestoreExc(nil, nil)
+						break
+					}
+				}
+			}
+			runtime.KeepAlive(ret)
+			runtime.KeepAlive(raised)
+		}
+	}
+
+	b.Run("0-elements", bench(newTestDict()))
+	b.Run("1-elements", bench(newTestDict(1, 2)))
+	b.Run("2-elements", bench(newTestDict(1, 2, 3, 4)))
+	b.Run("3-elements", bench(newTestDict(1, 2, 3, 4, 5, 6)))
+	b.Run("4-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8)))
+	b.Run("5-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)))
+	b.Run("6-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)))
+	b.Run("7-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)))
+	b.Run("8-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)))
+}
+
+func BenchmarkDictIterValues(b *testing.B) {
+	bench := func(d *Dict) func(*testing.B) {
+		return func(b *testing.B) {
+			f := NewRootFrame()
+			args := f.MakeArgs(1)
+			args[0] = d.ToObject()
+			b.ResetTimer()
+
+			var ret *Object
+			var raised *BaseException
+			for i := 0; i < b.N; i++ {
+				iter, _ := dictIterValues(f, args, nil)
+				for {
+					ret, raised = Next(f, iter)
+					if raised != nil {
+						if !raised.isInstance(StopIterationType) {
+							b.Fatalf("iteration failed with: %v", raised)
+						}
+						f.RestoreExc(nil, nil)
+						break
+					}
+				}
+			}
+			runtime.KeepAlive(ret)
+			runtime.KeepAlive(raised)
+		}
+	}
+
+	b.Run("0-elements", bench(newTestDict()))
+	b.Run("1-elements", bench(newTestDict(1, 2)))
+	b.Run("2-elements", bench(newTestDict(1, 2, 3, 4)))
+	b.Run("3-elements", bench(newTestDict(1, 2, 3, 4, 5, 6)))
+	b.Run("4-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8)))
+	b.Run("5-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)))
+	b.Run("6-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)))
+	b.Run("7-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)))
+	b.Run("8-elements", bench(newTestDict(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)))
+}
+
 func TestDictGetItemString(t *testing.T) {
 	getItemString := newBuiltinFunction("TestDictGetItemString", func(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 		if raised := checkFunctionArgs(f, "TestDictGetItem", args, DictType, StrType); raised != nil {
@@ -240,6 +392,19 @@ func TestDictGetItemString(t *testing.T) {
 	}
 	for _, cas := range cases {
 		if err := runInvokeTestCase(getItemString, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestDictHasKey(t *testing.T) {
+	cases := []invokeTestCase{
+		{args: wrapArgs(NewDict(), "foo"), want: False.ToObject()},
+		{args: wrapArgs(newTestDict("foo", 1, "bar", 2), "foo"), want: True.ToObject()},
+		{args: wrapArgs(newTestDict(3, "foo", "bar", 42), 42), want: False.ToObject()},
+	}
+	for _, cas := range cases {
+		if err := runInvokeMethodTestCase(DictType, "has_key", &cas); err != "" {
 			t.Error(err)
 		}
 	}
@@ -292,6 +457,48 @@ func TestDictIter(t *testing.T) {
 	}
 	for _, cas := range cases {
 		if err := runInvokeTestCase(iter, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestDictIterKeys(t *testing.T) {
+	iterkeys := mustNotRaise(GetAttr(NewRootFrame(), DictType.ToObject(), NewStr("iterkeys"), nil))
+	fun := wrapFuncForTest(func(f *Frame, args ...*Object) (*Object, *BaseException) {
+		iter, raised := iterkeys.Call(f, args, nil)
+		if raised != nil {
+			return nil, raised
+		}
+		return TupleType.Call(f, Args{iter}, nil)
+	})
+	cases := []invokeTestCase{
+		{args: wrapArgs(NewDict()), want: NewTuple().ToObject()},
+		{args: wrapArgs(newTestDict("foo", 1, "bar", 2)), want: newTestTuple("foo", "bar").ToObject()},
+		{args: wrapArgs(NewDict(), "bad"), wantExc: mustCreateException(TypeErrorType, "'iterkeys' of 'dict' requires 1 arguments")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestDictIterValues(t *testing.T) {
+	itervalues := mustNotRaise(GetAttr(NewRootFrame(), DictType.ToObject(), NewStr("itervalues"), nil))
+	fun := wrapFuncForTest(func(f *Frame, args ...*Object) (*Object, *BaseException) {
+		iter, raised := itervalues.Call(f, args, nil)
+		if raised != nil {
+			return nil, raised
+		}
+		return TupleType.Call(f, Args{iter}, nil)
+	})
+	cases := []invokeTestCase{
+		{args: wrapArgs(NewDict()), want: NewTuple().ToObject()},
+		{args: wrapArgs(newTestDict("foo", 1, "bar", 2)), want: newTestTuple(1, 2).ToObject()},
+		{args: wrapArgs(NewDict(), "bad"), wantExc: mustCreateException(TypeErrorType, "'itervalues' of 'dict' requires 1 arguments")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
 			t.Error(err)
 		}
 	}
@@ -365,6 +572,50 @@ func TestDictKeys(t *testing.T) {
 	}
 }
 
+func TestDictPop(t *testing.T) {
+	cases := []invokeTestCase{
+		{args: wrapArgs(newTestDict("foo", 42), "foo"), want: NewInt(42).ToObject()},
+		{args: wrapArgs(NewDict(), "foo", 42), want: NewInt(42).ToObject()},
+		{args: wrapArgs(NewDict(), "foo"), wantExc: mustCreateException(KeyErrorType, "foo")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeMethodTestCase(DictType, "pop", &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestDictPopItem(t *testing.T) {
+	popItem := mustNotRaise(GetAttr(NewRootFrame(), DictType.ToObject(), NewStr("popitem"), nil))
+	fun := wrapFuncForTest(func(f *Frame, d *Dict) (*Object, *BaseException) {
+		result := NewDict()
+		item, raised := popItem.Call(f, wrapArgs(d), nil)
+		for ; raised == nil; item, raised = popItem.Call(f, wrapArgs(d), nil) {
+			t := toTupleUnsafe(item)
+			result.SetItem(f, t.GetItem(0), t.GetItem(1))
+		}
+		if raised != nil {
+			if !raised.isInstance(KeyErrorType) {
+				return nil, raised
+			}
+			f.RestoreExc(nil, nil)
+		}
+		if raised = Assert(f, GetBool(d.Len() == 0).ToObject(), nil); raised != nil {
+			return nil, raised
+		}
+		return result.ToObject(), nil
+	})
+	cases := []invokeTestCase{
+		{args: wrapArgs(newTestDict("foo", 42)), want: newTestDict("foo", 42).ToObject()},
+		{args: wrapArgs(newTestDict("foo", 42, 123, "bar")), want: newTestDict("foo", 42, 123, "bar").ToObject()},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
 func TestDictNewInit(t *testing.T) {
 	cases := []invokeTestCase{
 		{args: wrapArgs(), want: NewDict().ToObject()},
@@ -390,6 +641,30 @@ func TestDictNewRaises(t *testing.T) {
 	}
 	for _, cas := range cases {
 		if err := runInvokeMethodTestCase(DictType, "__new__", &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestDictSetDefault(t *testing.T) {
+	setDefaultMethod := mustNotRaise(GetAttr(NewRootFrame(), DictType.ToObject(), NewStr("setdefault"), nil))
+	setDefault := newBuiltinFunction("TestDictSetDefault", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+		i, raised := setDefaultMethod.Call(f, args, kwargs)
+		if raised != nil {
+			return nil, raised
+		}
+		return NewTuple(i, args[0]).ToObject(), nil
+	}).ToObject()
+	cases := []invokeTestCase{
+		{args: wrapArgs(NewDict(), "foo"), want: newTestTuple(None, newTestDict("foo", None)).ToObject()},
+		{args: wrapArgs(NewDict(), "foo", 42), want: newTestTuple(42, newTestDict("foo", 42)).ToObject()},
+		{args: wrapArgs(newTestDict("foo", 42), "foo"), want: newTestTuple(42, newTestDict("foo", 42)).ToObject()},
+		{args: wrapArgs(newTestDict("foo", 42), "foo", 43), want: newTestTuple(42, newTestDict("foo", 42)).ToObject()},
+		{args: wrapArgs(NewDict()), wantExc: mustCreateException(TypeErrorType, "setdefault expected at least 1 arguments, got 0")},
+		{args: wrapArgs(NewDict(), "foo", "bar", "baz"), wantExc: mustCreateException(TypeErrorType, "setdefault expected at most 2 arguments, got 3")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(setDefault, &cas); err != "" {
 			t.Error(err)
 		}
 	}
@@ -533,6 +808,19 @@ func TestDictUpdate(t *testing.T) {
 	}
 	for _, cas := range cases {
 		if err := runInvokeTestCase(update, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestDictValues(t *testing.T) {
+	cases := []invokeTestCase{
+		{args: wrapArgs(NewDict()), want: NewList().ToObject()},
+		{args: wrapArgs(newTestDict("foo", 1, "bar", 2)), want: newTestList(1, 2).ToObject()},
+		{args: wrapArgs(NewDict(), "bad"), wantExc: mustCreateException(TypeErrorType, "'values' of 'dict' requires 1 arguments")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeMethodTestCase(DictType, "values", &cas); err != "" {
 			t.Error(err)
 		}
 	}

@@ -16,13 +16,17 @@
 
 """Classes for analyzing and storing the state of Python code blocks."""
 
+from __future__ import unicode_literals
+
 import abc
-import ast
 import collections
 import re
 
 from grumpy.compiler import expr
 from grumpy.compiler import util
+from grumpy.pythonparser import algorithm
+from grumpy.pythonparser import ast
+from grumpy.pythonparser import source
 
 
 _non_word_re = re.compile('[^A-Za-z0-9_]')
@@ -33,19 +37,16 @@ class Package(object):
 
   def __init__(self, name, alias=None):
     self.name = name
-    if not alias:
       # Use Γ as a separator since it provides readability with a low
       # probability of name collisions.
-      alias = 'π_' + name.replace('/', 'Γ')
-    self.alias = alias
+    self.alias = alias or 'π_' + name.replace('/', 'Γ').replace('.', 'Γ')
 
 
 class Loop(object):
   """Represents a for or while loop within a particular block."""
 
-  def __init__(self, start_label, end_label):
-    self.start_label = start_label
-    self.end_label = end_label
+  def __init__(self, breakvar):
+    self.breakvar = breakvar
 
 
 class Block(object):
@@ -53,18 +54,9 @@ class Block(object):
 
   __metaclass__ = abc.ABCMeta
 
-  # These are ModuleBlock attributes. Avoid pylint errors for accessing them on
-  # Block objects by defining them here.
-  _filename = None
-  _full_package_name = None
-  _libroot = None
-  _lines = None
-  _runtime = None
-  _strings = None
-  imports = None
-
-  def __init__(self, parent_block, name):
-    self.parent_block = parent_block
+  def __init__(self, parent, name):
+    self.root = parent.root if parent else self
+    self.parent = parent
     self.name = name
     self.free_temps = set()
     self.used_temps = set()
@@ -73,36 +65,6 @@ class Block(object):
     self.checkpoints = set()
     self.loop_stack = []
     self.is_generator = False
-
-    block = self
-    while block and not isinstance(block, ModuleBlock):
-      block = block.parent_block
-    self._module_block = block
-
-  @property
-  def full_package_name(self):
-    # pylint: disable=protected-access
-    return self._module_block._full_package_name
-
-  @property
-  def runtime(self):
-    return self._module_block._runtime  # pylint: disable=protected-access
-
-  @property
-  def libroot(self):
-    return self._module_block._libroot  # pylint: disable=protected-access
-
-  @property
-  def filename(self):
-    return self._module_block._filename  # pylint: disable=protected-access
-
-  @property
-  def lines(self):
-    return self._module_block._lines  # pylint: disable=protected-access
-
-  @property
-  def strings(self):
-    return self._module_block._strings  # pylint: disable=protected-access
 
   @abc.abstractmethod
   def bind_var(self, writer, name, value):
@@ -137,30 +99,6 @@ class Block(object):
     """
     pass
 
-  def add_import(self, name):
-    """Register the named Go package for import in this block's ModuleBlock.
-
-    add_import walks the block chain to the root ModuleBlock and adds a Package
-    to its imports dict.
-
-    Args:
-      name: The fully qualified Go package name.
-    Returns:
-      A Package representing the import.
-    """
-    return self.add_native_import('/'.join([self.libroot, name]))
-
-  def add_native_import(self, name):
-    alias = None
-    if name == 'grumpy':
-      name = self.runtime
-      alias = 'πg'
-    if name in self._module_block.imports:
-      return self._module_block.imports[name]
-    package = Package(name, alias)
-    self._module_block.imports[name] = package
-    return package
-
   def genlabel(self, is_checkpoint=False):
     self.label_count += 1
     if is_checkpoint:
@@ -185,8 +123,8 @@ class Block(object):
     self.used_temps.remove(v)
     self.free_temps.add(v)
 
-  def push_loop(self):
-    loop = Loop(self.genlabel(), self.genlabel())
+  def push_loop(self, breakvar):
+    loop = Loop(breakvar)
     self.loop_stack.append(loop)
     return loop
 
@@ -196,35 +134,25 @@ class Block(object):
   def top_loop(self):
     return self.loop_stack[-1]
 
-  def intern(self, s):
-    if len(s) > 64 or _non_word_re.search(s):
-      return 'πg.NewStr({})'.format(util.go_str(s))
-    self.strings.add(s)
-    return 'ß' + s
-
   def _resolve_global(self, writer, name):
     result = self.alloc_temp()
     writer.write_checked_call2(
-        result, 'πg.ResolveGlobal(πF, {})', self.intern(name))
+        result, 'πg.ResolveGlobal(πF, {})', self.root.intern(name))
     return result
 
 
 class ModuleBlock(Block):
-  """Python block for a module.
+  """Python block for a module."""
 
-  Attributes:
-    imports: A dict mapping fully qualified Go package names to Package objects.
-  """
-
-  def __init__(self, full_package_name, runtime, libroot, filename, lines):
-    super(ModuleBlock, self).__init__(None, '<module>')
-    self._full_package_name = full_package_name
-    self._runtime = runtime
-    self._libroot = libroot
-    self._filename = filename
-    self._lines = lines
-    self._strings = set()
-    self.imports = {}
+  def __init__(self, importer, full_package_name,
+               filename, src, future_features):
+    Block.__init__(self, None, '<module>')
+    self.importer = importer
+    self.full_package_name = full_package_name
+    self.filename = filename
+    self.buffer = source.Buffer(src)
+    self.strings = set()
+    self.future_features = future_features
 
   def bind_var(self, writer, name, value):
     writer.write_checked_call1(
@@ -238,24 +166,31 @@ class ModuleBlock(Block):
   def resolve_name(self, writer, name):
     return self._resolve_global(writer, name)
 
+  def intern(self, s):
+    if len(s) > 64 or _non_word_re.search(s):
+      return 'πg.NewStr({})'.format(util.go_str(s))
+    self.strings.add(s)
+    return 'ß' + s
+
 
 class ClassBlock(Block):
   """Python block for a class definition."""
 
-  def __init__(self, parent_block, name, global_vars):
-    super(ClassBlock, self).__init__(parent_block, name)
+  def __init__(self, parent, name, global_vars):
+    Block.__init__(self, parent, name)
     self.global_vars = global_vars
 
   def bind_var(self, writer, name, value):
     if name in self.global_vars:
-      return self._module_block.bind_var(writer, name, value)
+      return self.root.bind_var(writer, name, value)
     writer.write_checked_call1('πClass.SetItem(πF, {}.ToObject(), {})',
-                               self.intern(name), value)
+                               self.root.intern(name), value)
 
   def del_var(self, writer, name):
     if name in self.global_vars:
-      return self._module_block.del_var(writer, name)
-    writer.write_checked_call1('πg.DelVar(πF, πClass, {})', self.intern(name))
+      return self.root.del_var(writer, name)
+    writer.write_checked_call1('πg.DelVar(πF, πClass, {})',
+                               self.root.intern(name))
 
   def resolve_name(self, writer, name):
     local = 'nil'
@@ -263,7 +198,7 @@ class ClassBlock(Block):
       # Only look for a local in an outer block when name hasn't been declared
       # global in this block. If it has been declared global then we fallback
       # straight to the global dict.
-      block = self.parent_block
+      block = self.parent
       while not isinstance(block, ModuleBlock):
         if isinstance(block, FunctionBlock) and name in block.vars:
           var = block.vars[name]
@@ -271,26 +206,26 @@ class ClassBlock(Block):
             local = util.adjust_local_name(name)
           # When it is declared global, prefer it to anything in outer blocks.
           break
-        block = block.parent_block
+        block = block.parent
     result = self.alloc_temp()
     writer.write_checked_call2(
         result, 'πg.ResolveClass(πF, πClass, {}, {})',
-        local, self.intern(name))
+        local, self.root.intern(name))
     return result
 
 
 class FunctionBlock(Block):
   """Python block for a function definition."""
 
-  def __init__(self, parent_block, name, block_vars, is_generator):
-    super(FunctionBlock, self).__init__(parent_block, name)
+  def __init__(self, parent, name, block_vars, is_generator):
+    Block.__init__(self, parent, name)
     self.vars = block_vars
-    self.parent_block = parent_block
+    self.parent = parent
     self.is_generator = is_generator
 
   def bind_var(self, writer, name, value):
     if self.vars[name].type == Var.TYPE_GLOBAL:
-      return self._module_block.bind_var(writer, name, value)
+      return self.root.bind_var(writer, name, value)
     writer.write('{} = {}'.format(util.adjust_local_name(name), value))
 
   def del_var(self, writer, name):
@@ -299,7 +234,7 @@ class FunctionBlock(Block):
       raise util.ParseError(
           None, 'cannot delete nonexistent local: {}'.format(name))
     if var.type == Var.TYPE_GLOBAL:
-      return self._module_block.del_var(writer, name)
+      return self.root.del_var(writer, name)
     adjusted_name = util.adjust_local_name(name)
     # Resolve local first to ensure the variable is already bound.
     writer.write_checked_call1('πg.CheckLocal(πF, {}, {})',
@@ -318,7 +253,7 @@ class FunctionBlock(Block):
                                      util.adjust_local_name(name),
                                      util.go_str(name))
           return expr.GeneratedLocalVar(name)
-      block = block.parent_block
+      block = block.parent
     return self._resolve_global(writer, name)
 
 
@@ -343,7 +278,7 @@ class Var(object):
       self.init_expr = None
 
 
-class BlockVisitor(ast.NodeVisitor):
+class BlockVisitor(algorithm.Visitor):
   """Visits nodes in a function or class to determine block variables."""
 
   # pylint: disable=invalid-name,missing-docstring
@@ -391,8 +326,9 @@ class BlockVisitor(ast.NodeVisitor):
       self._register_local(alias.asname or alias.name)
 
   def visit_With(self, node):
-    if node.optional_vars:
-      self._assign_target(node.optional_vars)
+    for item in node.items:
+      if item.optional_vars:
+        self._assign_target(item.optional_vars)
     self.generic_visit(node)
 
   def _assign_target(self, target):
@@ -415,8 +351,7 @@ class BlockVisitor(ast.NodeVisitor):
       self.vars[name] = Var(name, Var.TYPE_GLOBAL)
 
   def _register_local(self, name):
-    var = self.vars.get(name)
-    if not var:
+    if not self.vars.get(name):
       self.vars[name] = Var(name, Var.TYPE_LOCAL)
 
 
@@ -426,19 +361,19 @@ class FunctionBlockVisitor(BlockVisitor):
   # pylint: disable=invalid-name,missing-docstring
 
   def __init__(self, node):
-    super(FunctionBlockVisitor, self).__init__()
+    BlockVisitor.__init__(self)
     self.is_generator = False
     node_args = node.args
-    args = [a.id for a in node_args.args]
+    args = [a.arg for a in node_args.args]
     if node_args.vararg:
-      args.append(node_args.vararg)
+      args.append(node_args.vararg.arg)
     if node_args.kwarg:
-      args.append(node_args.kwarg)
+      args.append(node_args.kwarg.arg)
     for i, name in enumerate(args):
       if name in self.vars:
         msg = "duplicate argument '{}' in function definition".format(name)
         raise util.ParseError(node, msg)
       self.vars[name] = Var(name, Var.TYPE_PARAM, arg_index=i)
 
-  def visit_Yield(self, unused_node):
+  def visit_Yield(self, unused_node): # pylint: disable=unused-argument
     self.is_generator = True

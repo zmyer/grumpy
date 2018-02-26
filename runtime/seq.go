@@ -64,13 +64,15 @@ func seqCompare(f *Frame, elems1, elems2 []*Object, cmp binaryOpFunc) (*Object, 
 // object.
 func seqApply(f *Frame, seq *Object, fun func([]*Object, bool) *BaseException) *BaseException {
 	switch {
-	case seq.isInstance(ListType):
+	// Don't use fast path referencing the underlying slice directly for
+	// list and tuple subtypes. See comment in listextend in listobject.c.
+	case seq.typ == ListType:
 		l := toListUnsafe(seq)
 		l.mutex.RLock()
 		raised := fun(l.elems, true)
 		l.mutex.RUnlock()
 		return raised
-	case seq.isInstance(TupleType):
+	case seq.typ == TupleType:
 		return fun(toTupleUnsafe(seq).elems, true)
 	default:
 		elems := []*Object{}
@@ -108,21 +110,84 @@ func seqClampIndex(i, seqLen int) int {
 	return i
 }
 
-func seqContains(f *Frame, elems []*Object, v *Object) (*Object, *BaseException) {
-	for _, i := range elems {
-		eq, raised := Eq(f, v, i)
+func seqContains(f *Frame, iterable *Object, v *Object) (*Object, *BaseException) {
+	pred := func(o *Object) (bool, *BaseException) {
+		eq, raised := Eq(f, v, o)
 		if raised != nil {
-			return nil, raised
+			return false, raised
 		}
 		ret, raised := IsTrue(f, eq)
 		if raised != nil {
-			return nil, raised
+			return false, raised
+		}
+		return ret, nil
+	}
+	foundEqItem, raised := seqFindFirst(f, iterable, pred)
+	if raised != nil {
+		return nil, raised
+	}
+	return GetBool(foundEqItem).ToObject(), raised
+}
+
+func seqCount(f *Frame, iterable *Object, v *Object) (*Object, *BaseException) {
+	count := 0
+	raised := seqForEach(f, iterable, func(o *Object) *BaseException {
+		eq, raised := Eq(f, o, v)
+		if raised != nil {
+			return raised
+		}
+		t, raised := IsTrue(f, eq)
+		if raised != nil {
+			return raised
+		}
+		if t {
+			count++
+		}
+		return nil
+	})
+	if raised != nil {
+		return nil, raised
+	}
+	return NewInt(count).ToObject(), nil
+}
+
+func seqFindFirst(f *Frame, iterable *Object, pred func(*Object) (bool, *BaseException)) (bool, *BaseException) {
+	iter, raised := Iter(f, iterable)
+	if raised != nil {
+		return false, raised
+	}
+	item, raised := Next(f, iter)
+	for ; raised == nil; item, raised = Next(f, iter) {
+		ret, raised := pred(item)
+		if raised != nil {
+			return false, raised
 		}
 		if ret {
-			return True.ToObject(), nil
+			return true, nil
 		}
 	}
-	return False.ToObject(), nil
+	if !raised.isInstance(StopIterationType) {
+		return false, raised
+	}
+	f.RestoreExc(nil, nil)
+	return false, nil
+}
+
+func seqFindElem(f *Frame, elems []*Object, o *Object) (int, *BaseException) {
+	for i, elem := range elems {
+		eq, raised := Eq(f, elem, o)
+		if raised != nil {
+			return -1, raised
+		}
+		found, raised := IsTrue(f, eq)
+		if raised != nil {
+			return -1, raised
+		}
+		if found {
+			return i, nil
+		}
+	}
+	return -1, nil
 }
 
 func seqForEach(f *Frame, iterable *Object, callback func(*Object) *BaseException) *BaseException {

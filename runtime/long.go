@@ -60,6 +60,15 @@ func toLongUnsafe(o *Object) *Long {
 	return (*Long)(o.toPointer())
 }
 
+// IntValue returns l's value as a plain int if it will not overflow.
+// Otherwise raises OverflowErrorType.
+func (l *Long) IntValue(f *Frame) (int, *BaseException) {
+	if !numInIntRange(&l.value) {
+		return 0, f.RaiseType(OverflowErrorType, "Python int too large to convert to a Go int")
+	}
+	return int(l.value.Int64()), nil
+}
+
 // ToObject upcasts l to an Object.
 func (l *Long) ToObject() *Object {
 	return &l.Object
@@ -86,6 +95,10 @@ func (l *Long) Neg() *Long {
 // LongType is the object representing the Python 'long' type.
 var LongType = newBasisType("long", reflect.TypeOf(Long{}), toLongUnsafe, ObjectType)
 
+func longAbs(z, x *big.Int) {
+	z.Abs(x)
+}
+
 func longAdd(z, x, y *big.Int) {
 	z.Add(x, y)
 }
@@ -97,6 +110,10 @@ func longAnd(z, x, y *big.Int) {
 func longDiv(z, x, y *big.Int) {
 	m := big.Int{}
 	longDivMod(x, y, z, &m)
+}
+
+func longDivAndMod(z, m, x, y *big.Int) {
+	longDivMod(x, y, z, m)
 }
 
 func longEq(x, y *big.Int) bool {
@@ -111,7 +128,7 @@ func longGetNewArgs(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 	if raised := checkMethodArgs(f, "__getnewargs__", args, LongType); raised != nil {
 		return nil, raised
 	}
-	return NewTuple(args[0]).ToObject(), nil
+	return NewTuple1(args[0]).ToObject(), nil
 }
 
 func longGT(x, y *big.Int) bool {
@@ -129,6 +146,11 @@ func longFloat(f *Frame, o *Object) (*Object, *BaseException) {
 func hashBigInt(x *big.Int) int {
 	// TODO: Make this hash match that of cpython.
 	return hashString(x.Text(36))
+}
+
+func longHex(f *Frame, o *Object) (*Object, *BaseException) {
+	val := numberToBase("0x", 16, o) + "L"
+	return NewStr(val).ToObject(), nil
 }
 
 func longHash(f *Frame, o *Object) (*Object, *BaseException) {
@@ -194,6 +216,10 @@ func longNative(f *Frame, o *Object) (reflect.Value, *BaseException) {
 
 func longNE(x, y *big.Int) bool {
 	return x.Cmp(y) != 0
+}
+
+func longNeg(z, x *big.Int) {
+	z.Neg(x)
 }
 
 func longNew(f *Frame, t *Type, args Args, _ KWArgs) (*Object, *BaseException) {
@@ -273,8 +299,20 @@ func longNonZero(x *big.Int) bool {
 	return x.Sign() != 0
 }
 
+func longOct(f *Frame, o *Object) (*Object, *BaseException) {
+	val := numberToBase("0", 8, o) + "L"
+	if val == "00L" {
+		val = "0L"
+	}
+	return NewStr(val).ToObject(), nil
+}
+
 func longOr(z, x, y *big.Int) {
 	z.Or(x, y)
+}
+
+func longPos(z, x *big.Int) {
+	z.Set(x)
 }
 
 func longRepr(f *Frame, o *Object) (*Object, *BaseException) {
@@ -299,14 +337,18 @@ func longXor(z, x, y *big.Int) {
 
 func initLongType(dict map[string]*Object) {
 	dict["__getnewargs__"] = newBuiltinFunction("__getnewargs__", longGetNewArgs).ToObject()
+	LongType.slots.Abs = longUnaryOpSlot(longAbs)
 	LongType.slots.Add = longBinaryOpSlot(longAdd)
 	LongType.slots.And = longBinaryOpSlot(longAnd)
 	LongType.slots.Div = longDivModOpSlot(longDiv)
+	LongType.slots.DivMod = longDivAndModOpSlot(longDivAndMod)
 	LongType.slots.Eq = longBinaryBoolOpSlot(longEq)
 	LongType.slots.Float = &unaryOpSlot{longFloat}
+	LongType.slots.FloorDiv = longDivModOpSlot(longDiv)
 	LongType.slots.GE = longBinaryBoolOpSlot(longGE)
 	LongType.slots.GT = longBinaryBoolOpSlot(longGT)
 	LongType.slots.Hash = &unaryOpSlot{longHash}
+	LongType.slots.Hex = &unaryOpSlot{longHex}
 	LongType.slots.Index = &unaryOpSlot{longIndex}
 	LongType.slots.Int = &unaryOpSlot{longInt}
 	LongType.slots.Invert = longUnaryOpSlot(longInvert)
@@ -318,17 +360,26 @@ func initLongType(dict map[string]*Object) {
 	LongType.slots.Mul = longBinaryOpSlot(longMul)
 	LongType.slots.Native = &nativeSlot{longNative}
 	LongType.slots.NE = longBinaryBoolOpSlot(longNE)
+	LongType.slots.Neg = longUnaryOpSlot(longNeg)
 	LongType.slots.New = &newSlot{longNew}
 	LongType.slots.NonZero = longUnaryBoolOpSlot(longNonZero)
+	LongType.slots.Oct = &unaryOpSlot{longOct}
 	LongType.slots.Or = longBinaryOpSlot(longOr)
+	LongType.slots.Pos = longUnaryOpSlot(longPos)
+	// This operation can return a float, it must use binaryOpSlot directly.
+	LongType.slots.Pow = &binaryOpSlot{longPow}
 	LongType.slots.RAdd = longRBinaryOpSlot(longAdd)
 	LongType.slots.RAnd = longRBinaryOpSlot(longAnd)
 	LongType.slots.RDiv = longRDivModOpSlot(longDiv)
+	LongType.slots.RDivMod = longRDivAndModOpSlot(longDivAndMod)
 	LongType.slots.Repr = &unaryOpSlot{longRepr}
+	LongType.slots.RFloorDiv = longRDivModOpSlot(longDiv)
 	LongType.slots.RMod = longRDivModOpSlot(longMod)
 	LongType.slots.RMul = longRBinaryOpSlot(longMul)
 	LongType.slots.ROr = longRBinaryOpSlot(longOr)
 	LongType.slots.RLShift = longRShiftOpSlot(longLShift)
+	// This operation can return a float, it must use binaryOpSlot directly.
+	LongType.slots.RPow = &binaryOpSlot{longRPow}
 	LongType.slots.RRShift = longRShiftOpSlot(longRShift)
 	LongType.slots.RShift = longShiftOpSlot(longRShift)
 	LongType.slots.RSub = longRBinaryOpSlot(longSub)
@@ -354,6 +405,13 @@ func longCallBinary(fun func(z, x, y *big.Int), v, w *Long) *Object {
 	return l.ToObject()
 }
 
+func longCallBinaryTuple(fun func(z, m, x, y *big.Int), v, w *Long) *Object {
+	l := Long{Object: Object{typ: LongType}}
+	ll := Long{Object: Object{typ: LongType}}
+	fun(&l.value, &ll.value, &v.value, &w.value)
+	return NewTuple2(l.ToObject(), ll.ToObject()).ToObject()
+}
+
 func longCallBinaryBool(fun func(x, y *big.Int) bool, v, w *Long) *Object {
 	return GetBool(fun(&v.value, &w.value)).ToObject()
 }
@@ -375,6 +433,13 @@ func longCallDivMod(fun func(z, x, y *big.Int), f *Frame, v, w *Long) (*Object, 
 		return nil, f.RaiseType(ZeroDivisionErrorType, "integer division or modulo by zero")
 	}
 	return longCallBinary(fun, v, w), nil
+}
+
+func longCallDivAndMod(fun func(z, m, x, y *big.Int), f *Frame, v, w *Long) (*Object, *BaseException) {
+	if w.value.Sign() == 0 {
+		return nil, f.RaiseType(ZeroDivisionErrorType, "integer division or modulo by zero")
+	}
+	return longCallBinaryTuple(fun, v, w), nil
 }
 
 func longUnaryOpSlot(fun func(z, x *big.Int)) *unaryOpSlot {
@@ -439,6 +504,30 @@ func longRDivModOpSlot(fun func(z, x, y *big.Int)) *binaryOpSlot {
 	return &binaryOpSlot{f}
 }
 
+func longDivAndModOpSlot(fun func(z, m, x, y *big.Int)) *binaryOpSlot {
+	f := func(f *Frame, v, w *Object) (*Object, *BaseException) {
+		if w.isInstance(IntType) {
+			w = intToLong(toIntUnsafe(w)).ToObject()
+		} else if !w.isInstance(LongType) {
+			return NotImplemented, nil
+		}
+		return longCallDivAndMod(fun, f, toLongUnsafe(v), toLongUnsafe(w))
+	}
+	return &binaryOpSlot{f}
+}
+
+func longRDivAndModOpSlot(fun func(z, m, x, y *big.Int)) *binaryOpSlot {
+	f := func(f *Frame, v, w *Object) (*Object, *BaseException) {
+		if w.isInstance(IntType) {
+			w = intToLong(toIntUnsafe(w)).ToObject()
+		} else if !w.isInstance(LongType) {
+			return NotImplemented, nil
+		}
+		return longCallDivAndMod(fun, f, toLongUnsafe(w), toLongUnsafe(v))
+	}
+	return &binaryOpSlot{f}
+}
+
 func longShiftOpSlot(fun func(z, x *big.Int, n uint)) *binaryOpSlot {
 	f := func(f *Frame, v, w *Object) (*Object, *BaseException) {
 		if w.isInstance(IntType) {
@@ -485,6 +574,56 @@ func longRBinaryBoolOpSlot(fun func(x, y *big.Int) bool) *binaryOpSlot {
 		return longCallBinaryBool(fun, toLongUnsafe(w), toLongUnsafe(v)), nil
 	}
 	return &binaryOpSlot{f}
+}
+
+func longPow(f *Frame, v, w *Object) (*Object, *BaseException) {
+	var wLong *big.Int
+
+	vLong := toLongUnsafe(v).Value()
+	if w.isInstance(LongType) {
+		wLong = toLongUnsafe(w).Value()
+	} else if w.isInstance(IntType) {
+		wLong = big.NewInt(int64(toIntUnsafe(w).Value()))
+	} else {
+		return NotImplemented, nil
+	}
+
+	if wLong.Sign() < 0 {
+		// The result will be a float, so we call the floating point function.
+		var vFloat, wFloat *Object
+		var raised *BaseException
+
+		vFloat, raised = longFloat(f, v)
+		if raised != nil {
+			return nil, raised
+		}
+		// w might be an int or a long
+		if w.isInstance(LongType) {
+			wFloat, raised = longFloat(f, w)
+			if raised != nil {
+				return nil, raised
+			}
+		} else if w.isInstance(IntType) {
+			wFloat = NewFloat(float64(toIntUnsafe(w).Value())).ToObject()
+		} else {
+			// This point should not be reachable
+			return nil, f.RaiseType(SystemErrorType, "internal error in longPow")
+		}
+		return floatPow(f, vFloat, wFloat)
+	}
+
+	return NewLong(big.NewInt(0).Exp(vLong, wLong, nil)).ToObject(), nil
+}
+
+func longRPow(f *Frame, v, w *Object) (*Object, *BaseException) {
+	if w.isInstance(LongType) {
+		return longPow(f, w, v)
+	}
+	if w.isInstance(IntType) {
+		wLong := NewLong(big.NewInt(int64(toIntUnsafe(w).Value()))).ToObject()
+		return longPow(f, wLong, v)
+	}
+	return NotImplemented, nil
 }
 
 func longDivMod(x, y, z, m *big.Int) {

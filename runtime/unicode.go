@@ -156,23 +156,41 @@ func unicodeGE(f *Frame, v, w *Object) (*Object, *BaseException) {
 	return unicodeCompare(f, toUnicodeUnsafe(v), w, False, True, True)
 }
 
+// unicodeGetItem returns a slice of string depending on whether index is an
+// integer or a slice. If index is neither of those types then a TypeError is
+// returned.
 func unicodeGetItem(f *Frame, o, key *Object) (*Object, *BaseException) {
 	s := toUnicodeUnsafe(o).Value()
-	if !key.isInstance(IntType) {
-		return nil, f.RaiseType(TypeErrorType, "string index out of range")
+	switch {
+	case key.typ.slots.Index != nil:
+		index, raised := seqCheckedIndex(f, len(s), toIntUnsafe(key).Value())
+		if raised != nil {
+			return nil, raised
+		}
+		return NewUnicodeFromRunes([]rune{s[index]}).ToObject(), nil
+	case key.isInstance(SliceType):
+		slice := toSliceUnsafe(key)
+		start, stop, step, sliceLen, raised := slice.calcSlice(f, len(s))
+		if raised != nil {
+			return nil, raised
+		}
+		if step == 1 {
+			return NewUnicodeFromRunes(s[start:stop]).ToObject(), nil
+		}
+		result := make([]rune, 0, sliceLen)
+		for j := start; j < stop; j += step {
+			result = append(result, s[j])
+		}
+		return NewUnicodeFromRunes([]rune(result)).ToObject(), nil
 	}
-	index, raised := seqCheckedIndex(f, len(s), toIntUnsafe(key).Value())
-	if raised != nil {
-		return nil, raised
-	}
-	return NewUnicodeFromRunes([]rune{s[index]}).ToObject(), nil
+	return nil, f.RaiseType(TypeErrorType, fmt.Sprintf("unicode indices must be integers or slice, not %s", key.typ.Name()))
 }
 
 func unicodeGetNewArgs(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 	if raised := checkMethodArgs(f, "__getnewargs__", args, UnicodeType); raised != nil {
 		return nil, raised
 	}
-	return NewTuple(args[0]).ToObject(), nil
+	return NewTuple1(args[0]).ToObject(), nil
 }
 
 func unicodeGT(f *Frame, v, w *Object) (*Object, *BaseException) {

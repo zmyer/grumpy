@@ -8,6 +8,8 @@ import (
 	"testing"
 )
 
+var overflowLong = big.NewInt(0).Add(maxIntBig, big.NewInt(101))
+
 func TestLongBasis(t *testing.T) {
 	got := LongType.slots.Basis.Fn(NewLong(big.NewInt(42)).ToObject()).Type()
 	want := reflect.TypeOf(Long{})
@@ -131,6 +133,20 @@ func TestLongBinaryOps(t *testing.T) {
 		{Div, NewList().ToObject(), NewLong(big.NewInt(21)).ToObject(), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for /: 'list' and 'long'")},
 		{Div, 1, 0, nil, mustCreateException(ZeroDivisionErrorType, "integer division or modulo by zero")},
 		{Div, MinInt, -1, NewLong(new(big.Int).Neg(minIntBig)).ToObject(), nil},
+		{DivMod, 7, 3, NewTuple2(NewLong(big.NewInt(2)).ToObject(), NewLong(big.NewInt(1)).ToObject()).ToObject(), nil},
+		{DivMod, 3, -7, NewTuple2(NewLong(big.NewInt(-1)).ToObject(), NewLong(big.NewInt(-4)).ToObject()).ToObject(), nil},
+		{DivMod, MaxInt, MinInt, NewTuple2(NewLong(big.NewInt(-1)).ToObject(), NewLong(big.NewInt(-1)).ToObject()).ToObject(), nil},
+		{DivMod, MinInt, MaxInt, NewTuple2(NewLong(big.NewInt(-2)).ToObject(), NewLong(big.NewInt(MaxInt-1)).ToObject()).ToObject(), nil},
+		{DivMod, MinInt, 1, NewTuple2(NewLong(big.NewInt(MinInt)).ToObject(), NewLong(big.NewInt(0)).ToObject()).ToObject(), nil},
+		{DivMod, MinInt, -1, NewTuple2(NewLong(new(big.Int).Neg(minIntBig)).ToObject(), NewLong(big.NewInt(0)).ToObject()).ToObject(), nil},
+		{DivMod, NewList().ToObject(), NewLong(big.NewInt(21)).ToObject(), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for divmod(): 'list' and 'long'")},
+		{DivMod, 1, 0, nil, mustCreateException(ZeroDivisionErrorType, "integer division or modulo by zero")},
+		{FloorDiv, 7, 3, NewLong(big.NewInt(2)).ToObject(), nil},
+		{FloorDiv, MaxInt, MinInt, NewLong(big.NewInt(-1)).ToObject(), nil},
+		{FloorDiv, MinInt, MaxInt, NewLong(big.NewInt(-2)).ToObject(), nil},
+		{FloorDiv, NewList().ToObject(), NewLong(big.NewInt(21)).ToObject(), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for //: 'list' and 'long'")},
+		{FloorDiv, 1, 0, nil, mustCreateException(ZeroDivisionErrorType, "integer division or modulo by zero")},
+		{FloorDiv, MinInt, -1, NewLong(new(big.Int).Neg(minIntBig)).ToObject(), nil},
 		{LShift, 2, 4, NewLong(big.NewInt(32)).ToObject(), nil},
 		{LShift, 12, 10, NewLong(big.NewInt(12288)).ToObject(), nil},
 		{LShift, 10, 100, NewLong(new(big.Int).Lsh(big.NewInt(10), 100)).ToObject(), nil},
@@ -156,6 +172,9 @@ func TestLongBinaryOps(t *testing.T) {
 		{Or, -100, 50, NewLong(big.NewInt(-66)).ToObject(), nil},
 		{Or, MaxInt, MinInt, NewLong(big.NewInt(-1)).ToObject(), nil},
 		{Or, newObject(ObjectType), 100, nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for |: 'object' and 'long'")},
+		{Pow, 2, 128, NewLong(big.NewInt(0).Exp(big.NewInt(2), big.NewInt(128), nil)).ToObject(), nil},
+		{Pow, 2, -2, NewFloat(0.25).ToObject(), nil},
+		{Pow, 2, newObject(ObjectType), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for **: 'long' and 'object'")},
 		{Sub, 22, 18, NewLong(big.NewInt(4)).ToObject(), nil},
 		{Sub, IntType.ToObject(), 42, nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for -: 'type' and 'long'")},
 		{Sub, MinInt, 1, NewLong(new(big.Int).Sub(minIntBig, big.NewInt(1))).ToObject(), nil},

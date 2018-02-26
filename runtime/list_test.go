@@ -79,6 +79,113 @@ func TestListCompare(t *testing.T) {
 	}
 }
 
+func TestListCount(t *testing.T) {
+	cases := []invokeTestCase{
+		{args: wrapArgs(NewList(), NewInt(1)), want: NewInt(0).ToObject()},
+		{args: wrapArgs(NewList(None, None, None), None), want: NewInt(3).ToObject()},
+		{args: wrapArgs(newTestList()), wantExc: mustCreateException(TypeErrorType, "'count' of 'list' requires 2 arguments")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeMethodTestCase(ListType, "count", &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestListDelItem(t *testing.T) {
+	badIndexType := newTestClass("badIndex", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__index__": newBuiltinFunction("__index__", func(f *Frame, _ Args, _ KWArgs) (*Object, *BaseException) {
+			return nil, f.RaiseType(ValueErrorType, "wut")
+		}).ToObject(),
+	}))
+	delItem := mustNotRaise(GetAttr(NewRootFrame(), ListType.ToObject(), NewStr("__delitem__"), nil))
+	fun := wrapFuncForTest(func(f *Frame, l *List, key *Object) (*Object, *BaseException) {
+		_, raised := delItem.Call(f, wrapArgs(l, key), nil)
+		if raised != nil {
+			return nil, raised
+		}
+		return l.ToObject(), nil
+	})
+	cases := []invokeTestCase{
+		{args: wrapArgs(newTestRange(3), 0), want: newTestList(1, 2).ToObject()},
+		{args: wrapArgs(newTestRange(3), 2), want: newTestList(0, 1).ToObject()},
+		{args: wrapArgs(NewList(), 101), wantExc: mustCreateException(IndexErrorType, "index out of range")},
+		{args: wrapArgs(NewList(), newTestSlice(50, 100)), want: NewList().ToObject()},
+		{args: wrapArgs(newTestList(1, 2, 3, 4, 5), newTestSlice(1, 3, None)), want: newTestList(1, 4, 5).ToObject()},
+		{args: wrapArgs(newTestList(1, 2, 3, 4, 5), newTestSlice(1, None, 2)), want: newTestList(1, 3, 5).ToObject()},
+		{args: wrapArgs(newTestList(1, 2, 3, 4, 5), newTestSlice(big.NewInt(1), None, 2)), want: newTestList(1, 3, 5).ToObject()},
+		{args: wrapArgs(newTestList(1, 2, 3, 4, 5), newTestSlice(1, big.NewInt(5), 2)), want: newTestList(1, 3, 5).ToObject()},
+		{args: wrapArgs(newTestList(1, 2, 3, 4, 5), newTestSlice(1, None, big.NewInt(2))), want: newTestList(1, 3, 5).ToObject()},
+		{args: wrapArgs(newTestList(1, 2, 3, 4, 5), newTestSlice(1.0, 3, None)), wantExc: mustCreateException(TypeErrorType, errBadSliceIndex)},
+		{args: wrapArgs(newTestList(1, 2, 3, 4, 5), newTestSlice(None, None, 4)), want: newTestList(2, 3, 4).ToObject()},
+		{args: wrapArgs(newTestRange(10), newTestSlice(1, 8, 3)), want: newTestList(0, 2, 3, 5, 6, 8, 9).ToObject()},
+		{args: wrapArgs(newTestList(1, 2, 3), newTestSlice(1, None, 0)), wantExc: mustCreateException(ValueErrorType, "slice step cannot be zero")},
+		{args: wrapArgs(newTestList(true), None), wantExc: mustCreateException(TypeErrorType, "list indices must be integers, not NoneType")},
+		{args: wrapArgs(newTestList(true), newObject(badIndexType)), wantExc: mustCreateException(ValueErrorType, "wut")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestListIndex(t *testing.T) {
+	intIndexType := newTestClass("IntIndex", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__index__": newBuiltinFunction("__index__", func(f *Frame, _ Args, _ KWArgs) (*Object, *BaseException) {
+			return NewInt(0).ToObject(), nil
+		}).ToObject(),
+	}))
+	cases := []invokeTestCase{
+		// {args: wrapArgs(newTestList(), 1, "foo"), wantExc: mustCreateException(TypeErrorType, "slice indices must be integers or None or have an __index__ method")},
+		{args: wrapArgs(newTestList(10, 20, 30), 20), want: NewInt(1).ToObject()},
+		{args: wrapArgs(newTestList(10, 20, 30), 20, newObject(intIndexType)), want: NewInt(1).ToObject()},
+		{args: wrapArgs(newTestList(0, "foo", "bar"), "foo"), want: NewInt(1).ToObject()},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), 3, 3), want: NewInt(3).ToObject()},
+		{args: wrapArgs(newTestList(0, 2.0, 2, 3, 4, 2, 1, "foo"), 3, 3), want: NewInt(3).ToObject()},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), 3, 4), wantExc: mustCreateException(ValueErrorType, "3 is not in list")},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), 3, 0, 4), want: NewInt(3).ToObject()},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), 3, 0, 3), wantExc: mustCreateException(ValueErrorType, "3 is not in list")},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), 3, -2), want: NewInt(3).ToObject()},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), 3, -1), wantExc: mustCreateException(ValueErrorType, "3 is not in list")},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), 3, 0, -1), want: NewInt(3).ToObject()},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), 3, 0, -2), wantExc: mustCreateException(ValueErrorType, "3 is not in list")},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), 3, 0, 999), want: NewInt(3).ToObject()},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), "foo", 0, 999), wantExc: mustCreateException(ValueErrorType, "'foo' is not in list")},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), 3, 999), wantExc: mustCreateException(ValueErrorType, "3 is not in list")},
+		{args: wrapArgs(newTestList(0, 1, 2, 3, 4), 3, 5, 0), wantExc: mustCreateException(ValueErrorType, "3 is not in list")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeMethodTestCase(ListType, "index", &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestListRemove(t *testing.T) {
+	fun := newBuiltinFunction("TestListRemove", func(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+		rem, raised := GetAttr(f, ListType.ToObject(), NewStr("remove"), nil)
+		if raised != nil {
+			return nil, raised
+		}
+		if _, raised := rem.Call(f, args, nil); raised != nil {
+			return nil, raised
+		}
+		return args[0], nil
+	}).ToObject()
+	cases := []invokeTestCase{
+		{args: wrapArgs(newTestList(1, 2, 3), 2), want: newTestList(1, 3).ToObject()},
+		{args: wrapArgs(newTestList(1, 2, 3, 2, 1), 2), want: newTestList(1, 3, 2, 1).ToObject()},
+		{args: wrapArgs(NewList()), wantExc: mustCreateException(TypeErrorType, "'remove' of 'list' requires 2 arguments")},
+		{args: wrapArgs(NewList(), 1), wantExc: mustCreateException(ValueErrorType, "list.remove(x): x not in list")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
 func BenchmarkListContains(b *testing.B) {
 	b.Run("false-3", func(b *testing.B) {
 		t := newTestList("foo", 42, "bar").ToObject()
@@ -220,6 +327,37 @@ func TestListAppend(t *testing.T) {
 	}
 }
 
+func TestListExtend(t *testing.T) {
+	extend := mustNotRaise(GetAttr(NewRootFrame(), ListType.ToObject(), NewStr("extend"), nil))
+	fun := newBuiltinFunction("TestListExtend", func(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+		if _, raised := extend.Call(f, args, nil); raised != nil {
+			return nil, raised
+		}
+		return args[0], nil
+	}).ToObject()
+	cases := []invokeTestCase{
+		{args: wrapArgs(newTestList(), newTestTuple()), want: newTestList().ToObject()},
+		{args: wrapArgs(newTestList(), newTestList()), want: newTestList().ToObject()},
+		{args: wrapArgs(newTestList(3), newTestList("foo")), want: newTestList(3, "foo").ToObject()},
+		{args: wrapArgs(newTestList(), newTestList("foo")), want: newTestList("foo").ToObject()},
+		{args: wrapArgs(newTestList(3), newTestList()), want: newTestList(3).ToObject()},
+		{args: wrapArgs(NewStr(""), newTestList()), wantExc: mustCreateException(TypeErrorType, "unbound method extend() must be called with list instance as first argument (got str instance instead)")},
+		{args: wrapArgs(None, None), wantExc: mustCreateException(TypeErrorType, "unbound method extend() must be called with list instance as first argument (got NoneType instance instead)")},
+		{args: wrapArgs(newTestList(3), None), wantExc: mustCreateException(TypeErrorType, "'NoneType' object is not iterable")},
+		{args: wrapArgs(newTestRange(5), newTestList(3)), want: newTestList(0, 1, 2, 3, 4, 3).ToObject()},
+		{args: wrapArgs(newTestRange(5), newTestList(3)), want: newTestList(0, 1, 2, 3, 4, 3).ToObject()},
+		{args: wrapArgs(newTestTuple(1, 2, 3), newTestList(3)), wantExc: mustCreateException(TypeErrorType, "unbound method extend() must be called with list instance as first argument (got tuple instance instead)")},
+		{args: wrapArgs(newTestList(4), newTestTuple(1, 2, 3)), want: newTestList(4, 1, 2, 3).ToObject()},
+		{args: wrapArgs(newTestList()), wantExc: mustCreateException(TypeErrorType, "extend() takes exactly one argument (1 given)")},
+		{args: wrapArgs(newTestList(), newTestTuple(), newTestTuple()), wantExc: mustCreateException(TypeErrorType, "extend() takes exactly one argument (3 given)")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
 func TestListLen(t *testing.T) {
 	cases := []invokeTestCase{
 		{args: wrapArgs(NewList()), want: NewInt(0).ToObject()},
@@ -353,6 +491,35 @@ func TestListIteratorIter(t *testing.T) {
 	}
 }
 
+func TestListPop(t *testing.T) {
+	pop := mustNotRaise(GetAttr(NewRootFrame(), ListType.ToObject(), NewStr("pop"), nil))
+	fun := wrapFuncForTest(func(f *Frame, l *List, args ...*Object) (*Tuple, *BaseException) {
+		result, raised := pop.Call(f, append(Args{l.ToObject()}, args...), nil)
+		if raised != nil {
+			return nil, raised
+		}
+		return newTestTuple(result, l), nil
+	})
+	cases := []invokeTestCase{
+		{args: wrapArgs(newTestList(1)), want: newTestTuple(1, newTestList().ToObject()).ToObject()},
+		{args: wrapArgs(newTestList(1), 0), want: newTestTuple(1, newTestList().ToObject()).ToObject()},
+		{args: wrapArgs(newTestList(-1, 0, 1)), want: newTestTuple(1, newTestList(-1, 0).ToObject()).ToObject()},
+		{args: wrapArgs(newTestList(-1, 0, 1), 0), want: newTestTuple(-1, newTestList(0, 1).ToObject()).ToObject()},
+		{args: wrapArgs(newTestList(-1, 0, 1), NewLong(big.NewInt(1))), want: newTestTuple(0, newTestList(-1, 1).ToObject()).ToObject()},
+		{args: wrapArgs(newTestList(-1, 0, 1), None), wantExc: mustCreateException(TypeErrorType, "an integer is required")},
+		{args: wrapArgs(newTestList(-1, 0, 1), None), wantExc: mustCreateException(TypeErrorType, "an integer is required")},
+		{args: wrapArgs(newTestList(-1, 0, 1), 3), wantExc: mustCreateException(IndexErrorType, "list index out of range")},
+		{args: wrapArgs(newTestList()), wantExc: mustCreateException(IndexErrorType, "list index out of range")},
+		{args: wrapArgs(newTestList(), 0), wantExc: mustCreateException(IndexErrorType, "list index out of range")},
+		{args: wrapArgs(newTestList(), 1), wantExc: mustCreateException(IndexErrorType, "list index out of range")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
 func TestListSetItem(t *testing.T) {
 	fun := newBuiltinFunction("TestListSetItem", func(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 		// Check that there is at least one arg, but otherwise leave
@@ -392,15 +559,12 @@ func TestListSetItem(t *testing.T) {
 }
 
 func TestListSort(t *testing.T) {
-	fun := newBuiltinFunction("TestListSetItem", func(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
-		if raised := checkFunctionArgs(f, "TestListSetItem", args, ListType); raised != nil {
+	sort := mustNotRaise(GetAttr(NewRootFrame(), ListType.ToObject(), NewStr("sort"), nil))
+	fun := newBuiltinFunction("TestListSort", func(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+		if _, raised := sort.Call(f, args, nil); raised != nil {
 			return nil, raised
 		}
-		l := toListUnsafe(args[0])
-		if raised := l.Sort(f); raised != nil {
-			return nil, raised
-		}
-		return l.ToObject(), nil
+		return args[0], nil
 	}).ToObject()
 	cases := []invokeTestCase{
 		{args: wrapArgs(NewList()), want: NewList().ToObject()},
@@ -408,6 +572,8 @@ func TestListSort(t *testing.T) {
 		{args: wrapArgs(newTestList(true, false)), want: newTestList(false, true).ToObject()},
 		{args: wrapArgs(newTestList(1, 2, 0, 3)), want: newTestRange(4).ToObject()},
 		{args: wrapArgs(newTestRange(100)), want: newTestRange(100).ToObject()},
+		{args: wrapArgs(1), wantExc: mustCreateException(TypeErrorType, "unbound method sort() must be called with list instance as first argument (got int instance instead)")},
+		{args: wrapArgs(NewList(), 1), wantExc: mustCreateException(TypeErrorType, "'sort' of 'list' requires 1 arguments")},
 	}
 	for _, cas := range cases {
 		if err := runInvokeTestCase(fun, &cas); err != "" {

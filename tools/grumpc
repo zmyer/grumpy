@@ -17,43 +17,59 @@
 
 """A Python -> Go transcompiler."""
 
+from __future__ import unicode_literals
+
 import argparse
-import ast
+import os
 import sys
 import textwrap
 
 from grumpy.compiler import block
+from grumpy.compiler import imputil
 from grumpy.compiler import stmt
 from grumpy.compiler import util
+from grumpy import pythonparser
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('filename', help='Python source filename')
+parser.add_argument('script', help='Python source filename')
 parser.add_argument('-modname', default='__main__', help='Python module name')
-parser.add_argument('-runtime', default='grumpy',
-                    help='Grumpy runtime package name')
-parser.add_argument('-libroot', default='grumpy/lib',
-                    help='Path where Grumpy standard library packages live')
 
 
 def main(args):
-  for arg in ('filename', 'modname', 'runtime', 'libroot'):
+  for arg in ('script', 'modname'):
     if not getattr(args, arg, None):
       print >> sys.stderr, '{} arg must not be empty'.format(arg)
       return 1
-  with open(args.filename) as py_file:
+
+  gopath = os.getenv('GOPATH', None)
+  if not gopath:
+    print >> sys.stderr, 'GOPATH not set'
+    return 1
+
+  with open(args.script) as py_file:
     py_contents = py_file.read()
   try:
-    mod = ast.parse(py_contents)
+    mod = pythonparser.parse(py_contents)
   except SyntaxError as e:
     print >> sys.stderr, '{}: line {}: invalid syntax: {}'.format(
         e.filename, e.lineno, e.text)
     return 2
+
+  # Do a pass for compiler directives from `from __future__ import *` statements
+  try:
+    future_node, future_features = imputil.parse_future_features(mod)
+  except util.CompileError as e:
+    print >> sys.stderr, str(e)
+    return 2
+
+  importer = imputil.Importer(gopath, args.modname, args.script,
+                              future_features.absolute_import)
   full_package_name = args.modname.replace('.', '/')
-  mod_block = block.ModuleBlock(full_package_name, args.runtime, args.libroot,
-                                args.filename, py_contents.split('\n'))
-  mod_block.add_native_import('grumpy')
-  visitor = stmt.StatementVisitor(mod_block)
+  mod_block = block.ModuleBlock(importer, full_package_name, args.script,
+                                py_contents, future_features)
+
+  visitor = stmt.StatementVisitor(mod_block, future_node)
   # Indent so that the module body is aligned with the goto labels.
   with visitor.writer.indent_block():
     try:
@@ -62,39 +78,27 @@ def main(args):
       print >> sys.stderr, str(e)
       return 2
 
-  imports = dict(mod_block.imports)
-  has_main = args.modname == '__main__'
-  if has_main:
-    imports['os'] = block.Package('os')
-
   writer = util.Writer(sys.stdout)
-  package_name = args.modname.split('.')[-1]
-  if has_main:
-    package_name = 'main'
-  writer.write('package {}'.format(package_name))
-  writer.write_import_block(imports)
-
-  writer.write('func initModule(πF *πg.Frame, '
-               '_ []*πg.Object) (*πg.Object, *πg.BaseException) {')
-  with writer.indent_block():
+  tmpl = textwrap.dedent("""\
+      package $package
+      import πg "grumpy"
+      var Code *πg.Code
+      func init() {
+      \tCode = πg.NewCode("<module>", $script, nil, 0, func(πF *πg.Frame, _ []*πg.Object) (*πg.Object, *πg.BaseException) {
+      \t\tvar πR *πg.Object; _ = πR
+      \t\tvar πE *πg.BaseException; _ = πE""")
+  writer.write_tmpl(tmpl, package=args.modname.split('.')[-1],
+                    script=util.go_str(args.script))
+  with writer.indent_block(2):
     for s in sorted(mod_block.strings):
       writer.write('ß{} := πg.InternStr({})'.format(s, util.go_str(s)))
     writer.write_temp_decls(mod_block)
-    writer.write_block(mod_block, visitor.writer.out.getvalue())
-  writer.write('}')
-  writer.write('var Code *πg.Code')
-
-  if has_main:
-    writer.write_tmpl(textwrap.dedent("""\
-      func main() {
-      \tCode = πg.NewCode("<module>", $filename, nil, 0, initModule)
-      \tπ_os.Exit(πg.RunMain(Code))
-      }"""), filename=util.go_str(args.filename))
-  else:
-    writer.write_tmpl(textwrap.dedent("""\
-      func init() {
-      \tCode = πg.NewCode("<module>", $filename, nil, 0, initModule)
-      }"""), filename=util.go_str(args.filename))
+    writer.write_block(mod_block, visitor.writer.getvalue())
+  writer.write_tmpl(textwrap.dedent("""\
+    \t\treturn nil, πE
+    \t})
+    \tπg.RegisterModule($modname, Code)
+    }"""), modname=util.go_str(args.modname))
   return 0
 
 

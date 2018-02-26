@@ -40,7 +40,7 @@ func TestImportModule(t *testing.T) {
 			return nil, f.RaiseType(AssertionErrorType, "circular imported recursively")
 		}
 		circularImported = true
-		if _, raised := ImportModule(f, "circular", []*Code{fooCode}); raised != nil {
+		if _, raised := ImportModule(f, "circular"); raised != nil {
 			return nil, raised
 		}
 		return None, nil
@@ -55,41 +55,47 @@ func TestImportModule(t *testing.T) {
 	// NOTE: This test progressively evolves sys.modules, checking after
 	// each test case that it's populated appropriately.
 	oldSysModules := SysModules
+	oldModuleRegistry := moduleRegistry
 	defer func() {
 		SysModules = oldSysModules
+		moduleRegistry = oldModuleRegistry
 	}()
 	SysModules = newStringDict(map[string]*Object{"invalid": invalidModule})
+	moduleRegistry = map[string]*Code{
+		"foo":         fooCode,
+		"foo.bar":     barCode,
+		"foo.bar.baz": bazCode,
+		"foo.qux":     quxCode,
+		"raises":      raisesCode,
+		"circular":    circularCode,
+		"clear":       clearCode,
+	}
 	cases := []struct {
 		name           string
-		codeObjs       []*Code
 		want           *Object
 		wantExc        *BaseException
 		wantSysModules *Dict
 	}{
 		{
-			"foo.bar",
-			[]*Code{},
+			"noexist",
 			nil,
-			mustCreateException(SystemErrorType, "invalid import: foo.bar"),
+			mustCreateException(ImportErrorType, "noexist"),
 			newStringDict(map[string]*Object{"invalid": invalidModule}),
 		},
 		{
 			"invalid",
-			[]*Code{fooCode},
 			NewTuple(invalidModule).ToObject(),
 			nil,
 			newStringDict(map[string]*Object{"invalid": invalidModule}),
 		},
 		{
 			"raises",
-			[]*Code{raisesCode},
 			nil,
 			mustCreateException(ValueErrorType, "uh oh"),
 			newStringDict(map[string]*Object{"invalid": invalidModule}),
 		},
 		{
 			"foo",
-			[]*Code{fooCode},
 			NewTuple(foo.ToObject()).ToObject(),
 			nil,
 			newStringDict(map[string]*Object{
@@ -99,7 +105,6 @@ func TestImportModule(t *testing.T) {
 		},
 		{
 			"foo",
-			[]*Code{fooCode},
 			NewTuple(foo.ToObject()).ToObject(),
 			nil,
 			newStringDict(map[string]*Object{
@@ -109,7 +114,6 @@ func TestImportModule(t *testing.T) {
 		},
 		{
 			"foo.qux",
-			[]*Code{fooCode, quxCode},
 			NewTuple(foo.ToObject(), qux.ToObject()).ToObject(),
 			nil,
 			newStringDict(map[string]*Object{
@@ -120,7 +124,6 @@ func TestImportModule(t *testing.T) {
 		},
 		{
 			"foo.bar.baz",
-			[]*Code{fooCode, barCode, bazCode},
 			NewTuple(foo.ToObject(), bar.ToObject(), baz.ToObject()).ToObject(),
 			nil,
 			newStringDict(map[string]*Object{
@@ -133,7 +136,6 @@ func TestImportModule(t *testing.T) {
 		},
 		{
 			"circular",
-			[]*Code{circularCode},
 			NewTuple(circularTestModule).ToObject(),
 			nil,
 			newStringDict(map[string]*Object{
@@ -147,7 +149,6 @@ func TestImportModule(t *testing.T) {
 		},
 		{
 			"clear",
-			[]*Code{clearCode},
 			nil,
 			mustCreateException(ImportErrorType, "Loaded module clear not found in sys.modules"),
 			newStringDict(map[string]*Object{
@@ -161,7 +162,7 @@ func TestImportModule(t *testing.T) {
 		},
 	}
 	for _, cas := range cases {
-		mods, raised := ImportModule(f, cas.name, cas.codeObjs)
+		mods, raised := ImportModule(f, cas.name)
 		var got *Object
 		if raised == nil {
 			got = NewTuple(mods...).ToObject()
@@ -181,26 +182,6 @@ func TestImportModule(t *testing.T) {
 			msg := "ImportModule(%q): sys.modules = %v, want %v"
 			t.Errorf(msg, cas.name, SysModules, cas.wantSysModules)
 		}
-	}
-}
-
-func TestImportNativeModule(t *testing.T) {
-	f := NewRootFrame()
-	oldSysModules := SysModules
-	defer func() {
-		SysModules = oldSysModules
-	}()
-	SysModules = NewDict()
-	bar := newObject(ObjectType)
-	o := mustNotRaise(ImportNativeModule(f, "grumpy.native.foo", map[string]*Object{"Bar": bar}))
-	if !o.isInstance(ModuleType) {
-		t.Errorf(`ImportNativeModule("grumpy.native.foo") returned %v, want module`, o)
-	} else if nameAttr := mustNotRaise(GetAttr(f, o, NewStr("__name__"), None)); !nameAttr.isInstance(StrType) {
-		t.Errorf(`ImportNativeModule("grumpy.native.foo") returned module with non-string name %v`, nameAttr)
-	} else if gotName := toStrUnsafe(nameAttr).Value(); gotName != "grumpy.native.foo" {
-		t.Errorf(`ImportNativeModule("grumpy.native.foo") returned module named %q, want "grumpy.native.foo"`, gotName)
-	} else if gotBar := mustNotRaise(GetAttr(f, o, NewStr("Bar"), None)); gotBar != bar {
-		t.Errorf("foo.Bar = %v, want %v", gotBar, bar)
 	}
 }
 
@@ -234,7 +215,7 @@ func TestModuleInit(t *testing.T) {
 		if raised != nil {
 			return nil, raised
 		}
-		name, raised := GetAttr(f, o, NewStr("__name__"), None)
+		name, raised := GetAttr(f, o, internedName, None)
 		if raised != nil {
 			return nil, raised
 		}
@@ -307,15 +288,15 @@ func TestRunMain(t *testing.T) {
 }
 
 func runMainAndCaptureStderr(code *Code) (int, string, error) {
-	oldStderr := os.Stderr
+	oldStderr := Stderr
 	defer func() {
-		os.Stderr = oldStderr
+		Stderr = oldStderr
 	}()
 	r, w, err := os.Pipe()
 	if err != nil {
 		return 0, "", err
 	}
-	os.Stderr = w
+	Stderr = NewFileFromFD(w.Fd(), nil)
 	c := make(chan int)
 	go func() {
 		defer w.Close()

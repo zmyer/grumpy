@@ -16,6 +16,7 @@ package grumpy
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 	"reflect"
 	"regexp"
@@ -24,7 +25,7 @@ import (
 
 func TestNativeMetaclassNew(t *testing.T) {
 	var i int16
-	intType := &newNativeType(reflect.TypeOf(i), IntType, NewDict()).Type
+	intType := newNativeType(reflect.TypeOf(i), IntType)
 	fun := wrapFuncForTest(func(f *Frame, args ...*Object) *BaseException {
 		newFunc, raised := GetAttr(f, intType.ToObject(), NewStr("new"), nil)
 		if raised != nil {
@@ -80,7 +81,7 @@ func TestNativeFuncCall(t *testing.T) {
 func TestNativeFuncName(t *testing.T) {
 	re := regexp.MustCompile(`(\w+\.)*\w+$`)
 	fun := wrapFuncForTest(func(f *Frame, o *Object) (string, *BaseException) {
-		desc, raised := GetItem(f, nativeFuncType.Dict().ToObject(), NewStr("__name__").ToObject())
+		desc, raised := GetItem(f, nativeFuncType.Dict().ToObject(), internedName.ToObject())
 		if raised != nil {
 			return "", raised
 		}
@@ -137,6 +138,39 @@ func TestNativeFuncStrRepr(t *testing.T) {
 			return nil
 		})
 		if err := runInvokeTestCase(fun, &invokeTestCase{args: cas.args, want: None}); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestNativeNew(t *testing.T) {
+	fun := wrapFuncForTest(func(f *Frame, t *Type, args ...*Object) (*Tuple, *BaseException) {
+		o, raised := t.Call(f, args, nil)
+		if raised != nil {
+			return nil, raised
+		}
+		return newTestTuple(o, o.Type()), nil
+	})
+	type testBool bool
+	testBoolType := getNativeType(reflect.TypeOf(testBool(false)))
+	type testFloat float32
+	testFloatType := getNativeType(reflect.TypeOf(testFloat(0)))
+	type testString string
+	testStringType := getNativeType(reflect.TypeOf(testString("")))
+	cases := []invokeTestCase{
+		{args: wrapArgs(testBoolType), want: newTestTuple(false, testBoolType).ToObject()},
+		{args: wrapArgs(testBoolType, ""), want: newTestTuple(false, testBoolType).ToObject()},
+		{args: wrapArgs(testBoolType, 123), want: newTestTuple(true, testBoolType).ToObject()},
+		{args: wrapArgs(testBoolType, "foo", "bar"), wantExc: mustCreateException(TypeErrorType, "testBool() takes at most 1 argument (2 given)")},
+		{args: wrapArgs(testFloatType), want: newTestTuple(0.0, testFloatType).ToObject()},
+		{args: wrapArgs(testFloatType, 3.14), want: newTestTuple(3.14, testFloatType).ToObject()},
+		{args: wrapArgs(testFloatType, "foo", "bar"), wantExc: mustCreateException(TypeErrorType, "'__new__' of 'float' requires 0 or 1 arguments")},
+		{args: wrapArgs(testStringType), want: newTestTuple("", testStringType).ToObject()},
+		{args: wrapArgs(testStringType, "foo"), want: newTestTuple("foo", testStringType).ToObject()},
+		{args: wrapArgs(testStringType, "foo", "bar"), wantExc: mustCreateException(TypeErrorType, "str() takes at most 1 argument (2 given)")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
 			t.Error(err)
 		}
 	}
@@ -364,7 +398,7 @@ func TestMaybeConvertValue(t *testing.T) {
 		{NewFloat(0.5).ToObject(), reflect.TypeOf(float32(0)), float32(0.5), nil},
 		{fooNative.ToObject(), reflect.TypeOf(&fooStruct{}), foo, nil},
 		{None, reflect.TypeOf((*int)(nil)), (*int)(nil), nil},
-		{None, reflect.TypeOf(""), nil, mustCreateException(TypeErrorType, "cannot convert None to string")},
+		{None, reflect.TypeOf(""), nil, mustCreateException(TypeErrorType, "an string is required")},
 	}
 	for _, cas := range cases {
 		fun := wrapFuncForTest(func(f *Frame) *BaseException {
@@ -384,6 +418,29 @@ func TestMaybeConvertValue(t *testing.T) {
 			testCase.want = None
 		}
 		if err := runInvokeTestCase(fun, &testCase); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestNativeTypedefNative(t *testing.T) {
+	fun := wrapFuncForTest(func(f *Frame, o *Object, wantType reflect.Type) (bool, *BaseException) {
+		val, raised := ToNative(f, o)
+		if raised != nil {
+			return false, raised
+		}
+		return val.Type() == wantType, nil
+	})
+	type testBool bool
+	testBoolRType := reflect.TypeOf(testBool(false))
+	type testInt int
+	testIntRType := reflect.TypeOf(testInt(0))
+	cases := []invokeTestCase{
+		{args: wrapArgs(mustNotRaise(getNativeType(testBoolRType).Call(NewRootFrame(), wrapArgs(true), nil)), testBoolRType), want: True.ToObject()},
+		{args: wrapArgs(mustNotRaise(getNativeType(testIntRType).Call(NewRootFrame(), wrapArgs(123), nil)), testIntRType), want: True.ToObject()},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
 			t.Error(err)
 		}
 	}
@@ -409,6 +466,209 @@ func TestNativeTypeName(t *testing.T) {
 	for _, cas := range cases {
 		if got := nativeTypeName(cas.rtype); got != cas.want {
 			t.Errorf("nativeTypeName(%v) = %q, want %q", cas.rtype, got, cas.want)
+		}
+	}
+}
+
+func TestNewNativeFieldChecksInstanceType(t *testing.T) {
+	f := NewRootFrame()
+
+	// Given a native object
+	native, raised := WrapNative(f, reflect.ValueOf(struct{ foo string }{}))
+	if raised != nil {
+		t.Fatal("Unexpected exception:", raised)
+	}
+
+	// When its field property is assigned to a different type
+	property, raised := native.typ.Dict().GetItemString(f, "foo")
+	if raised != nil {
+		t.Fatal("Unexpected exception:", raised)
+	}
+	if raised := IntType.Dict().SetItemString(f, "foo", property); raised != nil {
+		t.Fatal("Unexpected exception:", raised)
+	}
+
+	// And we try to access that property on an object of the new type
+	_, raised = GetAttr(f, NewInt(1).ToObject(), NewStr("foo"), nil)
+
+	// Then expect a TypeError was raised
+	if raised == nil || raised.Type() != TypeErrorType {
+		t.Fatal("Wanted TypeError; got:", raised)
+	}
+}
+
+func TestNativeSliceGetItem(t *testing.T) {
+	testRange := make([]int, 20)
+	for i := 0; i < len(testRange); i++ {
+		testRange[i] = i
+	}
+	badIndexType := newTestClass("badIndex", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__index__": newBuiltinFunction("__index__", func(f *Frame, _ Args, _ KWArgs) (*Object, *BaseException) {
+			return nil, f.RaiseType(ValueErrorType, "wut")
+		}).ToObject(),
+	}))
+	cases := []invokeTestCase{
+		{args: wrapArgs(testRange, 0), want: NewInt(0).ToObject()},
+		{args: wrapArgs(testRange, 19), want: NewInt(19).ToObject()},
+		{args: wrapArgs([]struct{}{}, 101), wantExc: mustCreateException(IndexErrorType, "index out of range")},
+		{args: wrapArgs([]bool{true}, None), wantExc: mustCreateException(TypeErrorType, "native slice indices must be integers, not NoneType")},
+		{args: wrapArgs(testRange, newObject(badIndexType)), wantExc: mustCreateException(ValueErrorType, "wut")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(wrapFuncForTest(GetItem), &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestNativeSliceGetItemSlice(t *testing.T) {
+	fun := wrapFuncForTest(func(f *Frame, o *Object, slice *Slice, want interface{}) *BaseException {
+		item, raised := GetItem(f, o, slice.ToObject())
+		if raised != nil {
+			return raised
+		}
+		val, raised := ToNative(f, item)
+		if raised != nil {
+			return raised
+		}
+		v := val.Interface()
+		msg := fmt.Sprintf("%v[%v] = %v, want %v", o, slice, v, want)
+		return Assert(f, GetBool(reflect.DeepEqual(v, want)).ToObject(), NewStr(msg).ToObject())
+	})
+	type fooStruct struct {
+		Bar int
+	}
+	cases := []invokeTestCase{
+		{args: wrapArgs([]string{}, newTestSlice(50, 100), []string{}), want: None},
+		{args: wrapArgs([]int{1, 2, 3, 4, 5}, newTestSlice(1, 3, None), []int{2, 3}), want: None},
+		{args: wrapArgs([]fooStruct{fooStruct{1}, fooStruct{10}}, newTestSlice(-1, None, None), []fooStruct{fooStruct{10}}), want: None},
+		{args: wrapArgs([]int{1, 2, 3, 4, 5}, newTestSlice(1, None, 2), []int{2, 4}), want: None},
+		{args: wrapArgs([]float64{1.0, 2.0, 3.0, 4.0, 5.0}, newTestSlice(big.NewInt(1), None, 2), []float64{2.0, 4.0}), want: None},
+		{args: wrapArgs([]string{"1", "2", "3", "4", "5"}, newTestSlice(1, big.NewInt(5), 2), []string{"2", "4"}), want: None},
+		{args: wrapArgs([]int{1, 2, 3, 4, 5}, newTestSlice(1, None, big.NewInt(2)), []int{2, 4}), want: None},
+		{args: wrapArgs([]int16{1, 2, 3, 4, 5}, newTestSlice(1.0, 3, None), None), wantExc: mustCreateException(TypeErrorType, errBadSliceIndex)},
+		{args: wrapArgs([]byte{1, 2, 3}, newTestSlice(1, None, 0), None), wantExc: mustCreateException(ValueErrorType, "slice step cannot be zero")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestNativeSliceLen(t *testing.T) {
+	cases := []invokeTestCase{
+		{args: wrapArgs([]string{"foo", "bar"}), want: NewInt(2).ToObject()},
+		{args: wrapArgs(make([]int, 100)), want: NewInt(100).ToObject()},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(wrapFuncForTest(Len), &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestNativeSliceStrRepr(t *testing.T) {
+	slice := make([]*Object, 2)
+	o := mustNotRaise(WrapNative(NewRootFrame(), reflect.ValueOf(slice)))
+	slice[0] = o
+	slice[1] = NewStr("foo").ToObject()
+	cases := []invokeTestCase{
+		{args: wrapArgs([]string{"foo", "bar"}), want: NewStr("[]string{'foo', 'bar'}").ToObject()},
+		{args: wrapArgs([]uint16{123}), want: NewStr("[]uint16{123}").ToObject()},
+		{args: wrapArgs(o), want: NewStr("[]*Object{[]*Object{...}, 'foo'}").ToObject()},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(wrapFuncForTest(ToStr), &cas); err != "" {
+			t.Error(err)
+		}
+		if err := runInvokeTestCase(wrapFuncForTest(Repr), &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestNativeSliceSetItemSlice(t *testing.T) {
+	fun := wrapFuncForTest(func(f *Frame, o, index, value *Object, want interface{}) *BaseException {
+		originalStr := o.String()
+		if raised := SetItem(f, o, index, value); raised != nil {
+			return raised
+		}
+		val, raised := ToNative(f, o)
+		if raised != nil {
+			return raised
+		}
+		v := val.Interface()
+		msg := fmt.Sprintf("%v[%v] = %v -> %v, want %v", originalStr, index, value, o, want)
+		return Assert(f, GetBool(reflect.DeepEqual(v, want)).ToObject(), NewStr(msg).ToObject())
+	})
+	type fooStruct struct {
+		bar []int
+	}
+	foo := fooStruct{[]int{1, 2, 3}}
+	bar := mustNotRaise(WrapNative(NewRootFrame(), reflect.ValueOf(foo).Field(0)))
+	cases := []invokeTestCase{
+		{args: wrapArgs([]string{"foo", "bar"}, 1, "baz", []string{"foo", "baz"}), want: None},
+		{args: wrapArgs([]uint16{1, 2, 3}, newTestSlice(1), newTestList(4), []uint16{4, 2, 3}), want: None},
+		{args: wrapArgs([]int{1, 2, 4, 5}, newTestSlice(1, None, 2), newTestTuple(10, 20), []int{1, 10, 4, 20}), want: None},
+		{args: wrapArgs([]float64{}, newTestSlice(4, 8, 0), NewList(), None), wantExc: mustCreateException(ValueErrorType, "slice step cannot be zero")},
+		{args: wrapArgs([]string{"foo", "bar"}, -100, None, None), wantExc: mustCreateException(IndexErrorType, "index out of range")},
+		{args: wrapArgs([]int{}, 101, None, None), wantExc: mustCreateException(IndexErrorType, "index out of range")},
+		{args: wrapArgs([]bool{true}, None, false, None), wantExc: mustCreateException(TypeErrorType, "native slice indices must be integers, not NoneType")},
+		{args: wrapArgs([]int8{1, 2, 3}, newTestSlice(0), []int8{0}, []int8{0, 1, 2, 3}), wantExc: mustCreateException(ValueErrorType, "attempt to assign sequence of size 1 to slice of size 0")},
+		{args: wrapArgs([]int{1, 2, 3}, newTestSlice(2, None), newTestList("foo"), None), wantExc: mustCreateException(TypeErrorType, "an int is required")},
+		{args: wrapArgs(bar, 1, 42, None), wantExc: mustCreateException(TypeErrorType, "cannot set slice element")},
+		{args: wrapArgs(bar, newTestSlice(1), newTestList(42), None), wantExc: mustCreateException(TypeErrorType, "cannot set slice element")},
+		{args: wrapArgs([]string{"foo", "bar"}, 1, 123.0, None), wantExc: mustCreateException(TypeErrorType, "an string is required")},
+		{args: wrapArgs([]string{"foo", "bar"}, 1, 123.0, None), wantExc: mustCreateException(TypeErrorType, "an string is required")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestNativeStructFieldGet(t *testing.T) {
+	fun := wrapFuncForTest(func(f *Frame, o *Object, attr *Str) (*Object, *BaseException) {
+		return GetAttr(f, o, attr, nil)
+	})
+	type fooStruct struct {
+		bar int
+		Baz float64
+	}
+	cases := []invokeTestCase{
+		{args: wrapArgs(fooStruct{bar: 1}, "bar"), want: NewInt(1).ToObject()},
+		{args: wrapArgs(&fooStruct{Baz: 3.14}, "Baz"), want: NewFloat(3.14).ToObject()},
+		{args: wrapArgs(fooStruct{}, "qux"), wantExc: mustCreateException(AttributeErrorType, `'fooStruct' object has no attribute 'qux'`)},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestNativeStructFieldSet(t *testing.T) {
+	fun := wrapFuncForTest(func(f *Frame, o *Object, attr *Str, value *Object) (*Object, *BaseException) {
+		if raised := SetAttr(f, o, attr, value); raised != nil {
+			return nil, raised
+		}
+		return GetAttr(f, o, attr, nil)
+	})
+	type fooStruct struct {
+		bar int
+		Baz float64
+	}
+	cases := []invokeTestCase{
+		{args: wrapArgs(&fooStruct{}, "Baz", 1.5), want: NewFloat(1.5).ToObject()},
+		{args: wrapArgs(fooStruct{}, "bar", 123), wantExc: mustCreateException(TypeErrorType, `cannot set field 'bar' of type 'fooStruct'`)},
+		{args: wrapArgs(fooStruct{}, "qux", "abc"), wantExc: mustCreateException(AttributeErrorType, `'fooStruct' has no attribute 'qux'`)},
+		{args: wrapArgs(&fooStruct{}, "Baz", "abc"), wantExc: mustCreateException(TypeErrorType, "an float64 is required")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
 		}
 	}
 }

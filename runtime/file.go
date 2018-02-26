@@ -35,20 +35,40 @@ type File struct {
 	mutex       sync.Mutex
 	mode        string
 	open        bool
+	Softspace   int `attr:"softspace" attr_mode:"rw"`
 	reader      *bufio.Reader
 	file        *os.File
 	skipNextLF  bool
 	univNewLine bool
+	close       *Object
 }
 
 // NewFileFromFD creates a file object from the given file descriptor fd.
-func NewFileFromFD(fd uintptr) *File {
+func NewFileFromFD(fd uintptr, close *Object) *File {
 	// TODO: Use fcntl or something to get the mode of the descriptor.
-	return &File{Object: Object{typ: FileType}, mode: "?", open: true, file: os.NewFile(fd, "<fdopen>")}
+	file := &File{
+		Object: Object{typ: FileType},
+		mode:   "?",
+		open:   true,
+		file:   os.NewFile(fd, "<fdopen>"),
+	}
+	if close != None {
+		file.close = close
+	}
+	file.reader = bufio.NewReader(file.file)
+	return file
 }
 
 func toFileUnsafe(o *Object) *File {
 	return (*File)(o.toPointer())
+}
+
+func (f *File) name() string {
+	name := "<uninitialized file>"
+	if f.file != nil {
+		name = f.file.Name()
+	}
+	return name
 }
 
 // ToObject upcasts f to an Object.
@@ -87,6 +107,19 @@ func (f *File) readLine(maxBytes int) (string, error) {
 	return buf.String(), nil
 }
 
+func (f *File) writeString(s string) error {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	if !f.open {
+		return io.ErrClosedPipe
+	}
+	if _, err := f.file.Write([]byte(s)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // FileType is the object representing the Python 'file' type.
 var FileType = newBasisType("file", reflect.TypeOf(File{}), toFileUnsafe, ObjectType)
 
@@ -112,6 +145,11 @@ func fileInit(f *Frame, o *Object, args Args, _ KWArgs) (*Object, *BaseException
 		flag = os.O_RDONLY
 	case "r+", "r+b":
 		flag = os.O_RDWR
+	// Difference between r+ and a+ is that a+ automatically creates file.
+	case "a+":
+		flag = os.O_RDWR | os.O_CREATE | os.O_APPEND
+	case "w+":
+		flag = os.O_RDWR | os.O_CREATE
 	case "w", "wb":
 		flag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 	default:
@@ -161,13 +199,59 @@ func fileClose(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 	file := toFileUnsafe(args[0])
 	file.mutex.Lock()
 	defer file.mutex.Unlock()
-	if file.open && file.file != nil {
-		if err := file.file.Close(); err != nil {
-			return nil, f.RaiseType(IOErrorType, err.Error())
+	ret := None
+	if file.open {
+		var raised *BaseException
+		if file.close != nil {
+			ret, raised = file.close.Call(f, args, nil)
+		} else if file.file != nil {
+			if err := file.file.Close(); err != nil {
+				raised = f.RaiseType(IOErrorType, err.Error())
+			}
+		}
+		if raised != nil {
+			return nil, raised
 		}
 	}
 	file.open = false
-	return None, nil
+	return ret, nil
+}
+
+func fileClosed(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	if raised := checkMethodArgs(f, "closed", args, FileType); raised != nil {
+		return nil, raised
+	}
+	file := toFileUnsafe(args[0])
+	file.mutex.Lock()
+	c := !file.open
+	file.mutex.Unlock()
+	return GetBool(c).ToObject(), nil
+}
+
+func fileFileno(f *Frame, args Args, _ KWArgs) (ret *Object, raised *BaseException) {
+	if raised := checkMethodArgs(f, "fileno", args, FileType); raised != nil {
+		return nil, raised
+	}
+	file := toFileUnsafe(args[0])
+	file.mutex.Lock()
+	if file.open {
+		ret = NewInt(int(file.file.Fd())).ToObject()
+	} else {
+		raised = f.RaiseType(ValueErrorType, "I/O operation on closed file")
+	}
+	file.mutex.Unlock()
+	return ret, raised
+}
+
+func fileGetName(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	if raised := checkMethodArgs(f, "_get_name", args, FileType); raised != nil {
+		return nil, raised
+	}
+	file := toFileUnsafe(args[0])
+	file.mutex.Lock()
+	name := file.name()
+	file.mutex.Unlock()
+	return NewStr(name).ToObject(), nil
 }
 
 func fileIter(f *Frame, o *Object) (*Object, *BaseException) {
@@ -211,7 +295,7 @@ func fileRead(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 		n, err = file.reader.Read(data)
 		data = data[:n]
 	}
-	if err != nil {
+	if err != nil && err != io.EOF {
 		return nil, f.RaiseType(IOErrorType, err.Error())
 	}
 	return NewStr(string(data)).ToObject(), nil
@@ -275,19 +359,13 @@ func fileRepr(f *Frame, o *Object) (*Object, *BaseException) {
 	} else {
 		openState = "closed"
 	}
-	var name string
-	if file.file != nil {
-		name = file.file.Name()
-	} else {
-		name = "<uninitialized file>"
-	}
 	var mode string
 	if file.mode != "" {
 		mode = file.mode
 	} else {
 		mode = "<uninitialized file>"
 	}
-	return NewStr(fmt.Sprintf("<%s file %q, mode %q at %p>", openState, name, mode, file)).ToObject(), nil
+	return NewStr(fmt.Sprintf("<%s file %q, mode %q at %p>", openState, file.name(), mode, file)).ToObject(), nil
 }
 
 func fileWrite(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
@@ -311,6 +389,9 @@ func initFileType(dict map[string]*Object) {
 	dict["__enter__"] = newBuiltinFunction("__enter__", fileEnter).ToObject()
 	dict["__exit__"] = newBuiltinFunction("__exit__", fileExit).ToObject()
 	dict["close"] = newBuiltinFunction("close", fileClose).ToObject()
+	dict["closed"] = newBuiltinFunction("closed", fileClosed).ToObject()
+	dict["fileno"] = newBuiltinFunction("fileno", fileFileno).ToObject()
+	dict["name"] = newProperty(newBuiltinFunction("_get_name", fileGetName).ToObject(), nil, nil).ToObject()
 	dict["read"] = newBuiltinFunction("read", fileRead).ToObject()
 	dict["readline"] = newBuiltinFunction("readline", fileReadLine).ToObject()
 	dict["readlines"] = newBuiltinFunction("readlines", fileReadLines).ToObject()
@@ -340,3 +421,12 @@ func fileParseReadArgs(f *Frame, method string, args Args) (*File, int, *BaseExc
 	}
 	return toFileUnsafe(args[0]), size, nil
 }
+
+var (
+	// Stdin is an alias for sys.stdin.
+	Stdin = NewFileFromFD(os.Stdin.Fd(), nil)
+	// Stdout is an alias for sys.stdout.
+	Stdout = NewFileFromFD(os.Stdout.Fd(), nil)
+	// Stderr is an alias for sys.stderr.
+	Stderr = NewFileFromFD(os.Stderr.Fd(), nil)
+)

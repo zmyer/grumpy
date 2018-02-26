@@ -32,6 +32,17 @@ def TestSysModules():
   assert sys.modules['sys'] is not None
 
 
+def TestExcClear():
+  try:
+    raise RuntimeError
+  except:
+    assert all(sys.exc_info()), sys.exc_info()
+    sys.exc_clear()
+    assert not any(sys.exc_info())
+  else:
+    assert False
+
+
 def TestExcInfoNoException():
   assert sys.exc_info() == (None, None, None)
 
@@ -73,6 +84,23 @@ def TestExitInvalidArgs():
     assert str(e) == 'exit() takes 1 arguments (3 given)', str(e)
   except:
     assert False
+
+
+def TestGetFrame():
+  try:
+    sys._getframe(42, 42)
+  except TypeError:
+    pass
+  else:
+    assert False
+  try:
+    sys._getframe(2000000000)
+  except ValueError:
+    pass
+  else:
+    assert False
+  assert sys._getframe().f_code.co_name == '_getframe'
+  assert sys._getframe(1).f_code.co_name == 'TestGetFrame'
 
 
 if __name__ == '__main__':

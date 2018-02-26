@@ -35,6 +35,11 @@ type threadState struct {
 	// is full are dropped. If the cache is empty then a new args slice
 	// will be allocated.
 	argsCache []Args
+
+	// frameCache is a local cache of allocated frames almost ready for
+	// reuse. The cache is maintained through the Frame `back` pointer as a
+	// singly linked list.
+	frameCache *Frame
 }
 
 func newThreadState() *threadState {
@@ -78,4 +83,37 @@ func (m *recursiveMutex) Unlock(f *Frame) {
 		atomic.StorePointer(p, unsafe.Pointer(nil))
 		m.mutex.Unlock()
 	}
+}
+
+// TryableMutex is a mutex-like object that also supports TryLock().
+type TryableMutex struct {
+	c chan bool
+}
+
+// NewTryableMutex returns a new TryableMutex.
+func NewTryableMutex() *TryableMutex {
+	m := &TryableMutex{make(chan bool, 1)}
+	m.Unlock()
+	return m
+}
+
+// Lock blocks until the mutex is available and then acquires a lock.
+func (m *TryableMutex) Lock() {
+	<-m.c
+}
+
+// TryLock returns true and acquires a lock if the mutex is available, otherwise
+// it returns false.
+func (m *TryableMutex) TryLock() bool {
+	select {
+	case <-m.c:
+		return true
+	default:
+		return false
+	}
+}
+
+// Unlock releases the mutex's lock.
+func (m *TryableMutex) Unlock() {
+	m.c <- true
 }

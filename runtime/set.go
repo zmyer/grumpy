@@ -81,7 +81,11 @@ func toSetUnsafe(o *Object) *Set {
 
 // Add inserts key into s. If key already exists then does nothing.
 func (s *Set) Add(f *Frame, key *Object) (bool, *BaseException) {
-	return s.dict.putItem(f, key, None)
+	origin, raised := s.dict.putItem(f, key, None, true)
+	if raised != nil {
+		return false, raised
+	}
+	return origin == nil, nil
 }
 
 // Contains returns true if key exists in s.
@@ -102,10 +106,7 @@ func (s *Set) ToObject() *Object {
 // Update inserts all elements in the iterable o into s.
 func (s *Set) Update(f *Frame, o *Object) *BaseException {
 	raised := seqForEach(f, o, func(key *Object) *BaseException {
-		if raised := s.dict.SetItem(f, key, None); raised != nil {
-			return raised
-		}
-		return nil
+		return s.dict.SetItem(f, key, None)
 	})
 	return raised
 }

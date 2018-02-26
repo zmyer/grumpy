@@ -17,11 +17,26 @@ package grumpy
 import (
 	"fmt"
 	"log"
-	"os"
 	"reflect"
+	"sync/atomic"
 )
 
-var logFatal = func(msg string) { log.Fatal(msg) }
+var (
+	logFatal = func(msg string) { log.Fatal(msg) }
+	// ThreadCount is the number of goroutines started with StartThread that
+	// have not yet joined.
+	ThreadCount int64
+)
+
+// Abs returns the result of o.__abs__ and is equivalent to the Python
+// expression "abs(o)".
+func Abs(f *Frame, o *Object) (*Object, *BaseException) {
+	abs := o.typ.slots.Abs
+	if abs == nil {
+		return nil, f.RaiseType(TypeErrorType, fmt.Sprintf("bad operand type for abs(): '%s'", o.typ.Name()))
+	}
+	return abs.Fn(f, o)
+}
 
 // Add returns the result of adding v and w together according to the
 // __add/radd__ operator.
@@ -52,6 +67,29 @@ func Assert(f *Frame, cond *Object, msg *Object) *BaseException {
 		}
 	}
 	return raised
+}
+
+// Compare implements a 3-way comparison which returns:
+//
+//   -1 if v < w
+//    0 if v == w
+//    1 if v > w
+//
+// It closely resembles the behavior of CPython's do_cmp in object.c.
+func Compare(f *Frame, v, w *Object) (*Object, *BaseException) {
+	cmp := v.typ.slots.Cmp
+	if v.typ == w.typ && cmp != nil {
+		return cmp.Fn(f, v, w)
+	}
+	r, raised := tryRichTo3wayCompare(f, v, w)
+	if r != NotImplemented {
+		return r, raised
+	}
+	r, raised = try3wayCompare(f, v, w)
+	if r != NotImplemented {
+		return r, raised
+	}
+	return NewInt(compareDefault(f, v, w)).ToObject(), nil
 }
 
 // Contains checks whether value is present in seq. It first checks the
@@ -127,6 +165,12 @@ func Div(f *Frame, v, w *Object) (*Object, *BaseException) {
 	return binaryOp(f, v, w, v.typ.slots.Div, v.typ.slots.RDiv, w.typ.slots.RDiv, "/")
 }
 
+// DivMod returns the result (quotient and remainder tuple) of dividing v by w
+// according to the __divmod/rdivmod__ operator.
+func DivMod(f *Frame, v, w *Object) (*Object, *BaseException) {
+	return binaryOp(f, v, w, v.typ.slots.DivMod, v.typ.slots.RDivMod, w.typ.slots.RDivMod, "divmod()")
+}
+
 // Eq returns the equality of v and w according to the __eq__ operator.
 func Eq(f *Frame, v, w *Object) (*Object, *BaseException) {
 	r, raised := compareRich(f, compareOpEq, v, w)
@@ -139,17 +183,39 @@ func Eq(f *Frame, v, w *Object) (*Object, *BaseException) {
 	return GetBool(compareDefault(f, v, w) == 0).ToObject(), nil
 }
 
-// FormatException returns a single-line exception string for the given
-// exception object, e.g. "NameError: name 'x' is not defined\n".
-func FormatException(f *Frame, e *BaseException) (string, *BaseException) {
-	s, raised := ToStr(f, e.ToObject())
+// FloorDiv returns the equality of v and w according to the __floordiv/rfloordiv__ operator.
+func FloorDiv(f *Frame, v, w *Object) (*Object, *BaseException) {
+	return binaryOp(f, v, w, v.typ.slots.FloorDiv, v.typ.slots.RFloorDiv, w.typ.slots.RFloorDiv, "//")
+}
+
+// FormatExc calls traceback.format_exc, falling back to the single line
+// exception message if that fails, e.g. "NameError: name 'x' is not defined\n".
+func FormatExc(f *Frame) (s string) {
+	exc, tb := f.ExcInfo()
+	defer func() {
+		if s == "" {
+			strResult, raised := ToStr(f, exc.ToObject())
+			if raised == nil && strResult.Value() != "" {
+				s = fmt.Sprintf("%s: %s\n", exc.typ.Name(), strResult.Value())
+			} else {
+				s = exc.typ.Name() + "\n"
+			}
+		}
+		f.RestoreExc(exc, tb)
+	}()
+	tbMod, raised := SysModules.GetItemString(f, "traceback")
+	if raised != nil || tbMod == nil {
+		return
+	}
+	formatExc, raised := GetAttr(f, tbMod, NewStr("format_exc"), nil)
 	if raised != nil {
-		return "", raised
+		return
 	}
-	if len(s.Value()) == 0 {
-		return e.typ.Name() + "\n", nil
+	result, raised := formatExc.Call(f, nil, nil)
+	if raised != nil || !result.isInstance(StrType) {
+		return
 	}
-	return fmt.Sprintf("%s: %s\n", e.typ.Name(), s.Value()), nil
+	return toStrUnsafe(result).Value()
 }
 
 // GE returns the result of operation v >= w.
@@ -219,6 +285,23 @@ func Hash(f *Frame, o *Object) (*Int, *BaseException) {
 	return toIntUnsafe(h), nil
 }
 
+// Hex returns the result of o.__hex__ if defined.
+func Hex(f *Frame, o *Object) (*Object, *BaseException) {
+	hex := o.typ.slots.Hex
+	if hex == nil {
+		raised := f.RaiseType(TypeErrorType, "hex() argument can't be converted to hex")
+		return nil, raised
+	}
+	h, raised := hex.Fn(f, o)
+	if raised != nil {
+		return nil, raised
+	}
+	if !h.isInstance(StrType) {
+		return nil, f.RaiseType(TypeErrorType, fmt.Sprintf("__hex__ returned non-string (type %s)", h.typ.name))
+	}
+	return h, nil
+}
+
 // IAdd returns the result of v.__iadd__ if defined, otherwise falls back to
 // Add.
 func IAdd(f *Frame, v, w *Object) (*Object, *BaseException) {
@@ -235,6 +318,18 @@ func IAnd(f *Frame, v, w *Object) (*Object, *BaseException) {
 // div.
 func IDiv(f *Frame, v, w *Object) (*Object, *BaseException) {
 	return inplaceOp(f, v, w, v.typ.slots.IDiv, Div)
+}
+
+// IFloorDiv returns the result of v.__ifloordiv__ if defined, otherwise falls back to
+// floordiv.
+func IFloorDiv(f *Frame, v, w *Object) (*Object, *BaseException) {
+	return inplaceOp(f, v, w, v.typ.slots.IFloorDiv, FloorDiv)
+}
+
+// ILShift returns the result of v.__ilshift__ if defined, otherwise falls back
+// to lshift.
+func ILShift(f *Frame, v, w *Object) (*Object, *BaseException) {
+	return inplaceOp(f, v, w, v.typ.slots.ILShift, LShift)
 }
 
 // IMod returns the result of v.__imod__ if defined, otherwise falls back to
@@ -262,6 +357,17 @@ func Invert(f *Frame, o *Object) (*Object, *BaseException) {
 // IOr returns the result of v.__ior__ if defined, otherwise falls back to Or.
 func IOr(f *Frame, v, w *Object) (*Object, *BaseException) {
 	return inplaceOp(f, v, w, v.typ.slots.IOr, Or)
+}
+
+// IPow returns the result of v.__pow__ if defined, otherwise falls back to IPow.
+func IPow(f *Frame, v, w *Object) (*Object, *BaseException) {
+	return inplaceOp(f, v, w, v.typ.slots.IPow, Pow)
+}
+
+// IRShift returns the result of v.__irshift__ if defined, otherwise falls back
+// to rshift.
+func IRShift(f *Frame, v, w *Object) (*Object, *BaseException) {
+	return inplaceOp(f, v, w, v.typ.slots.IRShift, RShift)
 }
 
 // IsInstance returns true if the type o is an instance of classinfo, or an
@@ -417,6 +523,12 @@ func Mul(f *Frame, v, w *Object) (*Object, *BaseException) {
 	return binaryOp(f, v, w, v.typ.slots.Mul, v.typ.slots.RMul, w.typ.slots.RMul, "*")
 }
 
+// Pow returns the result of x**y, the base-x exponential of y according to the
+// __pow/rpow__ operator.
+func Pow(f *Frame, v, w *Object) (*Object, *BaseException) {
+	return binaryOp(f, v, w, v.typ.slots.Pow, v.typ.slots.RPow, w.typ.slots.RPow, "**")
+}
+
 // Or returns the result of the bitwise or operator v | w according to
 // __or/ror__.
 func Or(f *Frame, v, w *Object) (*Object, *BaseException) {
@@ -447,19 +559,26 @@ func Index(f *Frame, o *Object) (*Object, *BaseException) {
 // IndexInt returns the value of o converted to a Go int according to o's
 // __index__ slot.
 // It raises a TypeError if o doesn't have an __index__ method.
-// If the returned value doesn't fit into an int, it raises an OverflowError.
-func IndexInt(f *Frame, o *Object) (int, *BaseException) {
-	i, raised := Index(f, o)
-	if raised != nil {
-		return 0, raised
+func IndexInt(f *Frame, o *Object) (i int, raised *BaseException) {
+	if index := o.typ.slots.Index; index != nil {
+		// Unwrap __index__ slot and fall through.
+		o, raised = index.Fn(f, o)
+		if raised != nil {
+			return 0, raised
+		}
 	}
-	if i.isInstance(IntType) {
-		return toIntUnsafe(i).Value(), nil
+	if o.isInstance(IntType) {
+		return toIntUnsafe(o).Value(), nil
 	}
-	if l := toLongUnsafe(i).Value(); numInIntRange(l) {
+	if o.isInstance(LongType) {
+		l := toLongUnsafe(o).Value()
+		// Anything bigger than maxIntBig will treat as maxIntBig.
+		if !numInIntRange(l) {
+			l = maxIntBig
+		}
 		return int(l.Int64()), nil
 	}
-	return 0, f.RaiseType(IndexErrorType, fmt.Sprintf("cannot fit '%s' into an index-sized integer", o.typ))
+	return 0, f.RaiseType(TypeErrorType, errBadSliceIndex)
 }
 
 // Invoke calls the given callable with the positional arguments given by args
@@ -549,27 +668,45 @@ func Next(f *Frame, iter *Object) (*Object, *BaseException) {
 	return next.Fn(f, iter)
 }
 
+// Oct returns the result of o.__oct__ if defined.
+func Oct(f *Frame, o *Object) (*Object, *BaseException) {
+	oct := o.typ.slots.Oct
+	if oct == nil {
+		raised := f.RaiseType(TypeErrorType, "oct() argument can't be converted to oct")
+		return nil, raised
+	}
+	o, raised := oct.Fn(f, o)
+	if raised != nil {
+		return nil, raised
+	}
+	if !o.isInstance(StrType) {
+		return nil, f.RaiseType(TypeErrorType, fmt.Sprintf("__oct__ returned non-string (type %s)", o.typ.name))
+	}
+	return o, nil
+}
+
+// Pos returns the result of o.__pos__ and is equivalent to the Python
+// expression "+o".
+func Pos(f *Frame, o *Object) (*Object, *BaseException) {
+	pos := o.typ.slots.Pos
+	if pos == nil {
+		return nil, f.RaiseType(TypeErrorType, fmt.Sprintf("bad operand type for unary +: '%s'", o.typ.Name()))
+	}
+	return pos.Fn(f, o)
+}
+
 // Print implements the Python print statement. It calls str() on the given args
 // and outputs the results to stdout separated by spaces. Similar to the Python
 // print statement.
 func Print(f *Frame, args Args, nl bool) *BaseException {
 	// TODO: Support outputting to files other than stdout and softspace.
-	for i, arg := range args {
-		if i > 0 {
-			fmt.Print(" ")
-		}
-		s, raised := ToStr(f, arg)
-		if raised != nil {
-			return raised
-		}
-		fmt.Print(s.Value())
-	}
+	var end string
 	if nl {
-		fmt.Println()
+		end = "\n"
 	} else if len(args) > 0 {
-		fmt.Print(" ")
+		end = " "
 	}
-	return nil
+	return pyPrint(f, args, " ", end, Stdout)
 }
 
 // Repr returns a string containing a printable representation of o. This is
@@ -666,14 +803,12 @@ func SetItem(f *Frame, o, key, value *Object) *BaseException {
 // StartThread runs callable in a new goroutine.
 func StartThread(callable *Object) {
 	go func() {
+		atomic.AddInt64(&ThreadCount, 1)
+		defer atomic.AddInt64(&ThreadCount, -1)
 		f := NewRootFrame()
 		_, raised := callable.Call(f, nil, nil)
 		if raised != nil {
-			s, raised := FormatException(f, raised)
-			if raised != nil {
-				s = raised.String()
-			}
-			fmt.Fprintf(os.Stderr, s)
+			Stderr.writeString(FormatExc(f))
 		}
 	}()
 }
@@ -722,7 +857,7 @@ func Tie(f *Frame, t TieTarget, o *Object) *BaseException {
 				return raised
 			}
 		} else if raised.isInstance(StopIterationType) {
-			return f.RaiseType(TypeErrorType, fmt.Sprintf("need more than %d values to unpack", i))
+			return f.RaiseType(ValueErrorType, fmt.Sprintf("need more than %d values to unpack", i))
 		} else {
 			return raised
 		}
@@ -736,6 +871,40 @@ func Tie(f *Frame, t TieTarget, o *Object) *BaseException {
 	}
 	f.RestoreExc(nil, nil)
 	return nil
+}
+
+// ToInt converts o to an integer type according to the __int__ slot. If the
+// result is not an int or long, then an exception is raised.
+func ToInt(f *Frame, o *Object) (*Object, *BaseException) {
+	if o.typ == IntType || o.typ == LongType {
+		return o, nil
+	}
+	intSlot := o.typ.slots.Int
+	if intSlot == nil {
+		return nil, f.RaiseType(TypeErrorType, "an integer is required")
+	}
+	i, raised := intSlot.Fn(f, o)
+	if raised != nil {
+		return nil, raised
+	}
+	if i.isInstance(IntType) || i.isInstance(LongType) {
+		return i, nil
+	}
+	return nil, f.RaiseType(TypeErrorType, fmt.Sprintf("__int__ returned non-int (type %s)", i.typ.Name()))
+}
+
+// ToIntValue converts o to an integer according to the __int__ slot. If the
+// result is not an int or long, or if the long value is too large to fit into
+// an int, then an exception is raised.
+func ToIntValue(f *Frame, o *Object) (int, *BaseException) {
+	i, raised := ToInt(f, o)
+	if raised != nil {
+		return 0, raised
+	}
+	if i.isInstance(IntType) {
+		return toIntUnsafe(i).Value(), nil
+	}
+	return toLongUnsafe(i).IntValue(f)
 }
 
 // ToNative converts o to a native Go object according to the __native__
@@ -764,7 +933,7 @@ func ToStr(f *Frame, o *Object) (*Str, *BaseException) {
 func Neg(f *Frame, o *Object) (*Object, *BaseException) {
 	neg := o.typ.slots.Neg
 	if neg == nil {
-		return nil, f.RaiseType(TypeErrorType, fmt.Sprintf("bad operand type for unary ~: '%s'", o.typ.Name()))
+		return nil, f.RaiseType(TypeErrorType, fmt.Sprintf("bad operand type for unary -: '%s'", o.typ.Name()))
 	}
 	return neg.Fn(f, o)
 }
@@ -868,7 +1037,59 @@ func (op compareOp) slot(t *Type) *binaryOpSlot {
 }
 
 func compareRich(f *Frame, op compareOp, v, w *Object) (*Object, *BaseException) {
-	// TODO: Support __cmp__.
+	r, raised := tryRichCompare(f, op, v, w)
+	if raised != nil {
+		return nil, raised
+	}
+	if r != NotImplemented {
+		return r, nil
+	}
+	return try3wayToRichCompare(f, op, v, w)
+}
+
+// convert3wayToObject converts the integer results from a 3-way
+// comparison to a suitable boolean value for the given rich
+// comparison op.
+func convert3wayToObject(op compareOp, c int) *Object {
+	b := false
+	switch op {
+	case compareOpLT:
+		b = c < 0
+	case compareOpLE:
+		b = c <= 0
+	case compareOpEq:
+		b = c == 0
+	case compareOpNE:
+		b = c != 0
+	case compareOpGE:
+		b = c >= 0
+	case compareOpGT:
+		b = c > 0
+	}
+	return GetBool(b).ToObject()
+}
+
+// try3wayToRichCompare tries to perform a rich comparison operation on the given objects
+// with the given comparison op using 3-way comparison. It closely resembles the behavior
+// of CPython's try_3way_to_rich_compare in object.c.
+func try3wayToRichCompare(f *Frame, op compareOp, v, w *Object) (*Object, *BaseException) {
+	r, raised := try3wayCompare(f, v, w)
+	if raised != nil {
+		return nil, raised
+	}
+	c := 0
+	if r == NotImplemented {
+		c = compareDefault(f, v, w)
+	} else {
+		c = toIntUnsafe(r).Value()
+	}
+	return convert3wayToObject(op, c), nil
+}
+
+// tryRichCompare tries to perform a rich comparison operation on the given
+// objects with the given comparison op using the rich comparison methods.
+// It closely resembles the behavior of CPython's try_rich_compare in object.c.
+func tryRichCompare(f *Frame, op compareOp, v, w *Object) (*Object, *BaseException) {
 	if v.typ != w.typ && w.typ.isSubclass(v.typ) {
 		// type(w) is a subclass of type(v) so try to use w's
 		// comparison operators since they're more specific.
@@ -934,6 +1155,83 @@ func compareDefault(f *Frame, v, w *Object) int {
 	return 1
 }
 
+// tryRichCompareBool tries a rich comparison with the given comparison op and
+// returns a bool indicating if the relation is true. It closely resembles the
+// behavior of CPython's try_rich_compare_bool in object.c.
+func tryRichCompareBool(f *Frame, op compareOp, v, w *Object) (bool, *BaseException) {
+	r, raised := tryRichCompare(f, op, v, w)
+	if raised != nil {
+		return false, raised
+	}
+	if r == NotImplemented {
+		return false, nil
+	}
+	br, raised := IsTrue(f, r)
+	if raised != nil {
+		return false, raised
+	}
+	return br, raised
+}
+
+// halfCompare tries a comparison with the __cmp__ slot, ensures the result
+// is an integer, and returns it. It closely resembles the behavior of CPython's
+// half_compare in typeobject.c.
+func halfCompare(f *Frame, v, w *Object) (*Object, *BaseException) {
+	cmp := v.typ.slots.Cmp
+	r, raised := cmp.Fn(f, v, w)
+	if raised != nil {
+		return nil, raised
+	}
+	if !r.isInstance(IntType) {
+		return nil, f.RaiseType(TypeErrorType, "an integer is required")
+	}
+	return r, nil
+}
+
+// try3wayCompare tries a comparison with the __cmp__ slot with the given
+// arguments. It first tries to use the __cmp__ slot on v and if that fails
+// on w. It closely resembles the behavior of CPython's try_3way_compare in
+// object.c.
+func try3wayCompare(f *Frame, v, w *Object) (*Object, *BaseException) {
+	cmp := v.typ.slots.Cmp
+	if cmp != nil {
+		return halfCompare(f, v, w)
+	}
+	cmp = w.typ.slots.Cmp
+	if cmp != nil {
+		r, raised := halfCompare(f, w, v)
+		if raised != nil {
+			return nil, raised
+		}
+		return intNeg(f, r)
+	}
+	return NotImplemented, nil
+}
+
+// tryRichTo3wayCompare tries to compute a 3-way comparison in terms of
+// the rich comparison operators (if they exist). It closely resembles
+// the behavior of CPython's try_rich_to_3way_compare in object.c.
+func tryRichTo3wayCompare(f *Frame, v, w *Object) (*Object, *BaseException) {
+	var tries = []struct {
+		op      compareOp
+		outcome int
+	}{
+		{compareOpEq, 0},
+		{compareOpLT, -1},
+		{compareOpGT, 1},
+	}
+	for _, try := range tries {
+		r, raised := tryRichCompareBool(f, try.op, v, w)
+		if raised != nil {
+			return nil, raised
+		}
+		if r {
+			return NewInt(try.outcome).ToObject(), nil
+		}
+	}
+	return NotImplemented, nil
+}
+
 func checkFunctionArgs(f *Frame, function string, args Args, types ...*Type) *BaseException {
 	if len(args) != len(types) {
 		msg := fmt.Sprintf("'%s' requires %d arguments", function, len(types))
@@ -978,4 +1276,33 @@ func checkMethodVarArgs(f *Frame, method string, args Args, types ...*Type) *Bas
 
 func hashNotImplemented(f *Frame, o *Object) (*Object, *BaseException) {
 	return nil, f.RaiseType(TypeErrorType, fmt.Sprintf("unhashable type: '%s'", o.typ.Name()))
+}
+
+// pyPrint encapsulates the logic of the Python print function.
+func pyPrint(f *Frame, args Args, sep, end string, file *File) *BaseException {
+	for i, arg := range args {
+		if i > 0 {
+			err := file.writeString(sep)
+			if err != nil {
+				return f.RaiseType(IOErrorType, err.Error())
+			}
+		}
+
+		s, raised := ToStr(f, arg)
+		if raised != nil {
+			return raised
+		}
+
+		err := file.writeString(s.Value())
+		if err != nil {
+			return f.RaiseType(IOErrorType, err.Error())
+		}
+	}
+
+	err := file.writeString(end)
+	if err != nil {
+		return f.RaiseType(IOErrorType, err.Error())
+	}
+
+	return nil
 }

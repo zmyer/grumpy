@@ -16,16 +16,20 @@
 
 """Tests for StatementVisitor."""
 
-import ast
+from __future__ import unicode_literals
+
 import re
 import subprocess
 import textwrap
 import unittest
 
 from grumpy.compiler import block
+from grumpy.compiler import imputil
 from grumpy.compiler import shard_test
 from grumpy.compiler import stmt
 from grumpy.compiler import util
+from grumpy import pythonparser
+from grumpy.pythonparser import ast
 
 
 class StatementVisitorTest(unittest.TestCase):
@@ -99,10 +103,11 @@ class StatementVisitorTest(unittest.TestCase):
         foo &= 3
         print foo""")))
 
-  def testAugAssignUnsupportedOp(self):
-    expected = 'augmented assignment op not implemented'
-    self.assertRaisesRegexp(util.ParseError, expected,
-                            _ParseAndVisit, 'foo **= bar')
+  def testAugAssignPow(self):
+    self.assertEqual((0, '64\n'), _GrumpRun(textwrap.dedent("""\
+        foo = 8
+        foo **= 2
+        print foo""")))
 
   def testClassDef(self):
     self.assertEqual((0, "<type 'type'>\n"), _GrumpRun(textwrap.dedent("""\
@@ -202,6 +207,36 @@ class StatementVisitorTest(unittest.TestCase):
         else:
           print 'bar'""")))
 
+  def testForElseBreakNotNested(self):
+    self.assertRaisesRegexp(
+        util.ParseError, "'continue' not in loop",
+        _ParseAndVisit, 'for i in (1,):\n  pass\nelse:\n  continue')
+
+  def testForElseContinueNotNested(self):
+    self.assertRaisesRegexp(
+        util.ParseError, "'continue' not in loop",
+        _ParseAndVisit, 'for i in (1,):\n  pass\nelse:\n  continue')
+
+  def testFunctionDecorator(self):
+    self.assertEqual((0, '<b>foo</b>\n'), _GrumpRun(textwrap.dedent("""\
+        def bold(fn):
+          return lambda: '<b>' + fn() + '</b>'
+        @bold
+        def foo():
+          return 'foo'
+        print foo()""")))
+
+  def testFunctionDecoratorWithArg(self):
+    self.assertEqual((0, '<b id=red>foo</b>\n'), _GrumpRun(textwrap.dedent("""\
+        def tag(name):
+          def bold(fn):
+            return lambda: '<b id=' + name + '>' + fn() + '</b>'
+          return bold
+        @tag('red')
+        def foo():
+          return 'foo'
+        print foo()""")))
+
   def testFunctionDef(self):
     self.assertEqual((0, 'bar baz\n'), _GrumpRun(textwrap.dedent("""\
         def foo(a, b):
@@ -262,36 +297,65 @@ class StatementVisitorTest(unittest.TestCase):
         import sys
         print type(sys.modules)""")))
 
+  def testImportFutureLateRaises(self):
+    regexp = 'from __future__ imports must occur at the beginning of the file'
+    self.assertRaisesRegexp(util.ImportError, regexp, _ParseAndVisit,
+                            'foo = bar\nfrom __future__ import print_function')
+
+  def testFutureUnicodeLiterals(self):
+    want = "u'foo'\n"
+    self.assertEqual((0, want), _GrumpRun(textwrap.dedent("""\
+        from __future__ import unicode_literals
+        print repr('foo')""")))
+
+  def testImportMember(self):
+    self.assertEqual((0, "<type 'dict'>\n"), _GrumpRun(textwrap.dedent("""\
+        from sys import modules
+        print type(modules)""")))
+
   def testImportConflictingPackage(self):
     self.assertEqual((0, ''), _GrumpRun(textwrap.dedent("""\
         import time
-        from __go__.time import Now""")))
+        from "__go__/time" import Now""")))
 
   def testImportNative(self):
     self.assertEqual((0, '1 1000000000\n'), _GrumpRun(textwrap.dedent("""\
-        from __go__.time import Nanosecond, Second
+        from "__go__/time" import Nanosecond, Second
         print Nanosecond, Second""")))
 
-  def testImportGrump(self):
+  def testImportGrumpy(self):
     self.assertEqual((0, ''), _GrumpRun(textwrap.dedent("""\
-        from __go__.grumpy import Assert
+        from "__go__/grumpy" import Assert
         Assert(__frame__(), True, 'bad')""")))
-
-  def testImportNativeModuleRaises(self):
-    regexp = r'for native imports use "from __go__\.xyz import \.\.\." syntax'
-    self.assertRaisesRegexp(util.ParseError, regexp, _ParseAndVisit,
-                            'import __go__.foo')
 
   def testImportNativeType(self):
     self.assertEqual((0, "<type 'Duration'>\n"), _GrumpRun(textwrap.dedent("""\
-        from __go__.time import type_Duration as Duration
+        from "__go__/time" import Duration
         print Duration""")))
 
-  def testPrint(self):
+  def testImportWildcardMemberRaises(self):
+    regexp = 'wildcard member import is not implemented'
+    self.assertRaisesRegexp(util.ImportError, regexp, _ParseAndVisit,
+                            'from foo import *')
+    self.assertRaisesRegexp(util.ImportError, regexp, _ParseAndVisit,
+                            'from "__go__/foo" import *')
+
+  def testPrintStatement(self):
     self.assertEqual((0, 'abc 123\nfoo bar\n'), _GrumpRun(textwrap.dedent("""\
         print 'abc',
         print '123'
         print 'foo', 'bar'""")))
+
+  def testPrintFunction(self):
+    want = "abc\n123\nabc 123\nabcx123\nabc 123 "
+    self.assertEqual((0, want), _GrumpRun(textwrap.dedent("""\
+        "module docstring is ok to proceed __future__"
+        from __future__ import print_function
+        print('abc')
+        print(123)
+        print('abc', 123)
+        print('abc', 123, sep='x')
+        print('abc', 123, end=' ')""")))
 
   def testRaiseExitStatus(self):
     self.assertEqual(1, _GrumpRun('raise Exception')[0])
@@ -381,8 +445,8 @@ class StatementVisitorTest(unittest.TestCase):
         finally:
           print 'bar'"""))
     self.assertEqual(1, result[0])
-    # Some platforms show "exit status 1" message so don't test strict equality.
-    self.assertIn('foo bar\nfoo bar\nException\n', result[1])
+    self.assertIn('foo bar\nfoo bar\n', result[1])
+    self.assertIn('Exception\n', result[1])
 
   def testWhile(self):
     self.assertEqual((0, '2\n1\n'), _GrumpRun(textwrap.dedent("""\
@@ -441,7 +505,7 @@ class StatementVisitorTest(unittest.TestCase):
         'exc', 'tb', handlers), [1, 2])
     expected = re.compile(r'ResolveGlobal\(.*foo.*\bIsInstance\(.*'
                           r'goto Label1.*goto Label2', re.DOTALL)
-    self.assertRegexpMatches(visitor.writer.out.getvalue(), expected)
+    self.assertRegexpMatches(visitor.writer.getvalue(), expected)
 
   def testWriteExceptDispatcherBareExceptionNotLast(self):
     visitor = stmt.StatementVisitor(_MakeModuleBlock())
@@ -461,18 +525,22 @@ class StatementVisitorTest(unittest.TestCase):
         r'ResolveGlobal\(.*foo.*\bif .*\bIsInstance\(.*\{.*goto Label1.*'
         r'ResolveGlobal\(.*bar.*\bif .*\bIsInstance\(.*\{.*goto Label2.*'
         r'\bRaise\(exc\.ToObject\(\), nil, tb\.ToObject\(\)\)', re.DOTALL)
-    self.assertRegexpMatches(visitor.writer.out.getvalue(), expected)
+    self.assertRegexpMatches(visitor.writer.getvalue(), expected)
 
 
 def _MakeModuleBlock():
-  return block.ModuleBlock('__main__', 'grumpy', 'grumpy/lib', '<test>', [])
+  return block.ModuleBlock(None, '__main__', '<test>', '',
+                           imputil.FutureFeatures())
 
 
 def _ParseAndVisit(source):
-  b = block.ModuleBlock('__main__', 'grumpy', 'grumpy/lib', '<test>',
-                        source.split('\n'))
+  mod = pythonparser.parse(source)
+  _, future_features = imputil.parse_future_features(mod)
+  importer = imputil.Importer(None, 'foo', 'foo.py', False)
+  b = block.ModuleBlock(importer, '__main__', '<test>',
+                        source, future_features)
   visitor = stmt.StatementVisitor(b)
-  visitor.visit(ast.parse(source))
+  visitor.visit(mod)
   return visitor
 
 

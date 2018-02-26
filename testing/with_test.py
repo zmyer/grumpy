@@ -180,3 +180,32 @@ with EnterResult([1, (2, 3)]) as (h, (i, j)):
 assert h == 1
 assert i == 2
 assert j == 3
+
+
+class Foo(object):
+  exited = False
+  def __enter__(self):
+    pass
+  def __exit__(self, *args):
+    self.exited = True
+
+
+# This checks for a bug where a with clause inside an except body raises an
+# exception because it was checking ExcInfo() to determine whether an exception
+# occurred.
+try:
+  raise AssertionError
+except:
+  foo = Foo()
+  with foo:
+    pass
+  assert foo.exited
+
+
+# Return statement should not bypass the with exit handler.
+foo = Foo()
+def bar():
+  with foo:
+    return
+bar()
+assert foo.exited

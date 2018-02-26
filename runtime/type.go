@@ -153,7 +153,11 @@ func prepareBuiltinType(typ *Type, init builtinTypeInit) {
 		for i := 0; i < numFields; i++ {
 			field := basis.Field(i)
 			if attr := field.Tag.Get("attr"); attr != "" {
-				dict[attr] = makeStructFieldDescriptor(typ, field.Name, attr)
+				fieldMode := fieldDescriptorRO
+				if mode := field.Tag.Get("attr_mode"); mode == "rw" {
+					fieldMode = fieldDescriptorRW
+				}
+				dict[attr] = makeStructFieldDescriptor(typ, field.Name, attr, fieldMode)
 			}
 		}
 	}
@@ -168,7 +172,7 @@ func prepareBuiltinType(typ *Type, init builtinTypeInit) {
 			}
 		}
 	}
-	typ.dict = newStringDict(dict)
+	typ.setDict(newStringDict(dict))
 	if err := prepareType(typ); err != "" {
 		logFatal(err)
 	}
@@ -283,7 +287,7 @@ func (t *Type) Name() string {
 
 // FullName returns t's fully qualified name including the module.
 func (t *Type) FullName(f *Frame) (string, *BaseException) {
-	moduleAttr, raised := t.dict.GetItemString(f, "__module__")
+	moduleAttr, raised := t.Dict().GetItemString(f, "__module__")
 	if raised != nil {
 		return "", raised
 	}
@@ -309,7 +313,7 @@ func (t *Type) isSubclass(super *Type) bool {
 
 func (t *Type) mroLookup(f *Frame, name *Str) (*Object, *BaseException) {
 	for _, t := range t.mro {
-		v, raised := t.dict.GetItem(f, name.ToObject())
+		v, raised := t.Dict().GetItem(f, name.ToObject())
 		if v != nil || raised != nil {
 			return v, raised
 		}
